@@ -148,6 +148,3 @@ kyverno       validate-pods  kyverno/kyverno-svc/validate
 Pull requests and issues are welcome. Please include relevant tests or sample manifests to illustrate validation scenarios.
 
 For questions contact <hello@kolteq.com>.
-
-## License
-Distributed under the MIT license. See `LICENSE` for details.
