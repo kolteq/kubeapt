@@ -3,7 +3,7 @@
 
 package main
 
-import "kubeapt/cmd"
+import "github.com/kolteq/kubeapt/cmd"
 
 func main() {
 	cmd.Execute()

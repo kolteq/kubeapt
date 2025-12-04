@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"kubeapt/internal/cmd"
-	"kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/cmd"
+	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
 
 var (

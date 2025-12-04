@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"kubeapt/internal/logging"
+	"github.com/kolteq/kubeapt/internal/logging"
 )
 
 func GetLocalValidatingAdmissionPolicies(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {

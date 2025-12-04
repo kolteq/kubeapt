@@ -27,9 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"kubeapt/internal/cel"
-	"kubeapt/internal/kubernetes"
-	"kubeapt/internal/logging"
+	"github.com/kolteq/kubeapt/internal/cel"
+	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/logging"
 )
 
 var getLogLevel func() string
