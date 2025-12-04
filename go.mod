@@ -1,4 +1,4 @@
-module kubeapt
+module github.com/kolteq/kubeapt
 
 go 1.24.1
 
