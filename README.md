@@ -11,7 +11,7 @@ Kubeapt is a command-line utility by KolTEQ GmbH that validates Kubernetes admis
 
 ## Installation
 ```bash
-go install github.com/kolteq/kubeapt@latest
+go install github.com/kolteq/kubeapt@v0.1.0
 ```
 
 Alternatively run from source within this repository:
