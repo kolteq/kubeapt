@@ -20,11 +20,7 @@ import (
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
 
-const (
-	psaLabelEnforce = "pod-security.kubernetes.io/enforce"
-	psaLabelAudit   = "pod-security.kubernetes.io/audit"
-	psaLabelWarn    = "pod-security.kubernetes.io/warn"
-)
+const ()
 
 func ScanCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -65,31 +61,24 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		return err
 	}
 
-	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(table.StyleRounded)
-	t.Style().Title.Align = text.AlignLeft
-	t.SetTitle("PSA Namespace Summary")
-	t.AppendHeader(table.Row{"Namespace", "Enforce", "Audit", "Warn", "Pods", "Violations"})
+	namespaceLabels := make(map[string]map[string]string, len(nsList.Items))
+	var results []psaNamespaceResult
 
 	for _, ns := range nsList.Items {
-		labels := convertPSALabels(map[string]string{
-			"pod-security.kubernetes.io/enforce": ns.Labels[psaLabelEnforce],
-			"pod-security.kubernetes.io/audit":   ns.Labels[psaLabelAudit],
-			"pod-security.kubernetes.io/warn":    ns.Labels[psaLabelWarn],
-		})
-		t.AppendRow(table.Row{
-			ns.Name,
-			formatPSAMode(labels, "enforce"),
-			formatPSAMode(labels, "audit"),
-			formatPSAMode(labels, "warn"),
-			"-",
-			"-",
+		nsLabels := convertPSANamespaceLabels(ns.Labels)
+		namespaceLabels[ns.Name] = nsLabels
+		results = append(results, psaNamespaceResult{
+			Namespace: ns.Name,
+			Modes:     convertPSALabels(nsLabels),
+			Kolteq: map[string]bool{
+				"enforce": hasKolteqMode(nsLabels, "enforce"),
+				"audit":   hasKolteqMode(nsLabels, "audit"),
+				"warn":    hasKolteqMode(nsLabels, "warn"),
+			},
 		})
 	}
 
-	fmt.Println()
-	t.Render()
+	printPSATable(results, namespaceLabelsUseKolteq(namespaceLabels))
 
 	vaps, err := kubernetes.GetRemoteValidatingAdmissionPolicies()
 	if err != nil {
