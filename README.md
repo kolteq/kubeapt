@@ -4,7 +4,7 @@ Kubeapt is a command-line utility by KolTEQ GmbH that validates Kubernetes admis
 
 ## Features
 - Validate VAP policies/bindings against local or remote resources with CEL execution and reporting modes.
-- Audit PSA namespace labels and pod compliance across local manifests or Kubernetes clusters.
+- Audit PSA namespace labels from manifests or live clusters, with Pod Security label mapping (`pod-security.kubernetes.io/*` ↔ `pss.kolteq.com/*`).
 - Scan a cluster for PSA adoption, Kyverno/OPA deployments, built-in admission plugins, and webhook targets.
 - Produce JSON or table-based compliance summaries, detailed violation logs, and resource inventories.
 - Flexible resource loading from files, directories, or live API queries with namespace selection helpers.
@@ -22,7 +22,7 @@ go run ./main.go <command>
 ## Usage
 Top-level commands:
 - `validate vap` – evaluate ValidatingAdmissionPolicies/Bindings
-- `validate psa` – verify Pod Security Admission coverage and pod compliance
+- `validate psa` – summarize Pod Security Admission levels per namespace (KolTEQ labels highlighted)
 - `scan` – inspect a cluster for admission hardening components
 
 Global flags shared by validate subcommands:
@@ -70,32 +70,26 @@ Namespace  1
 ### Validate PSA
 ```bash
 go run main.go validate psa \
-  [--resources ./manifests | --remote-resources] \
-  [--remote-namespaces] [--psa-level baseline] \
-  [--report summary|all]
+  [--resources ./manifests] \
+  [--remote-namespaces]
 ```
 Highlights:
-- Evaluate pod manifests against namespace PSA labels or an override level.
+- Summarize namespace PSA levels (enforce/audit/warn). Levels sourced from KolTEQ labels show as `restricted (KolTEQ)`.
 - Pull namespace labels with `--remote-namespaces` or rely on local manifests when available.
-- `--report all` mirrors the violation output style used by `validate vap`.
+- Uses the same PSA table format as the scan command; no violation listing for PSA.
 
 Example:
 ```bash
 go run main.go validate psa \
-  --resources ./examples/workloads \
-  --report all
+  --resources ./examples/workloads
 ```
 Possible output:
 ```
-PSA Namespace Summary
-──────────────────────────────────────────────────────────────
-Namespace   Enforce     Audit   Warn   Pods   Violations
-dev         baseline    -       -      2      1
-prod        restricted  -       -      3      0
-
-Violations
-[VIOLATION] Namespace dev
-  - pod web-legacy: container legacy missing securityContext
+PSA Namespace Levels
+────────────────────────────────────────
+Namespace   Enforce       Audit   Warn
+dev         baseline      -       -
+prod        restricted    -       restricted (KolTEQ)
 ```
 
 ### Scan
@@ -115,11 +109,11 @@ go run main.go scan
 Possible output:
 ```
 [1/3] Inspecting namespaces and admission controllers...
-PSA Namespace Summary
-───────────────────────────────────────
-Namespace   Enforce     Audit   Warn   Pods   Violations
-default     baseline    -       -      -      -
-prod        restricted  audit   warn   -      -
+PSA Namespace Levels
+────────────────────────────────────────
+Namespace   Enforce       Audit   Warn
+default     baseline      -       -
+prod        restricted    audit   warn (KolTEQ)
 
 ValidatingAdmissionPolicies present: 2
 Kyverno detected in cluster
