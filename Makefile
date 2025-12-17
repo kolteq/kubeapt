@@ -24,6 +24,7 @@ build:
 	  echo "Building $$outfile"; \
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -o $$outfile $(SOURCES); \
 	done
+	zip -j $(BIN_DIR)/$(PROJECT)-binaries.zip $(BIN_DIR)/*
 
 clean:
 	rm -rf $(BIN_DIR)
