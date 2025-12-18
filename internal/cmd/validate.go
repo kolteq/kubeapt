@@ -73,7 +73,8 @@ func ValidateCmd(logLevelGetter func() string) *cobra.Command {
 	cmd.PersistentFlags().Bool("pipeline", false, "Indicate the command runs inside CI/CD")
 	cmd.PersistentFlags().BoolP("all-namespaces", "A", false, "Use all namespaces instead of the active one")
 	cmd.PersistentFlags().StringP("namespaces", "n", "", "Comma separated list of namespaces to evaluate")
-	cmd.PersistentFlags().StringP("output", "o", "table", "Specify the report output format: table or json")
+	cmd.PersistentFlags().StringP("format", "f", "table", "Specify the report output format: table or json")
+	cmd.PersistentFlags().String("output", "", "Write the report to a file path instead of stdout")
 	cmd.AddCommand(newValidateVAPCmd())
 	cmd.AddCommand(newValidatePSACmd())
 	return cmd
@@ -148,13 +149,14 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	reportMode := strings.ToLower(cmd.Flag("report").Value.String())
-	output := strings.ToLower(cmd.Flag("output").Value.String())
+	format := strings.ToLower(cmd.Flag("format").Value.String())
+	outputPath := strings.TrimSpace(cmd.Flag("output").Value.String())
 
 	if reportMode != "summary" && reportMode != "all" {
 		return fmt.Errorf("invalid report type %s, expected summary or all", reportMode)
 	}
-	if output != "table" && output != "json" {
-		return fmt.Errorf("invalid output format %s, expected table or json", output)
+	if format != "table" && format != "json" {
+		return fmt.Errorf("invalid output format %s, expected table or json", format)
 	}
 
 	if allNamespaces && len(namespaces) > 0 {
@@ -169,15 +171,39 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	}
 	defer logging.Close()
 
+	progressEnabled := true
+	writer := io.Writer(os.Stdout)
+	tableStyle := table.StyleRounded
+	useColor := true
+	if outputPath != "" {
+		f, err := os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to open output file: %w", err)
+		}
+		defer f.Close()
+		writer = f
+		tableStyle = table.StyleDefault
+		useColor = false
+	}
+
 	var vaps []admissionregistrationv1.ValidatingAdmissionPolicy
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 
 	if remotePolicies {
-		vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
-		if err != nil {
-			return err
-		}
-		bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+		err = withProgress("Fetching remote policies", 2, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
+			if err != nil {
+				return err
+			}
+			tracker.Increment(1)
+
+			bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+			if err != nil {
+				return err
+			}
+			tracker.Increment(1)
+			return nil
+		})
 		if err != nil {
 			return err
 		}
@@ -186,11 +212,27 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 			bindingFile = policyFile
 			logging.Debugf("No bindings path provided, reusing %s", policyFile)
 		}
-		vaps, err = kubernetes.GetLocalValidatingAdmissionPolicies(policyFile)
+		policyFiles, err := kubernetes.CountManifestFiles(policyFile)
 		if err != nil {
 			return err
 		}
-		bindings, err = kubernetes.GetLocalValidatingAdmissionPolicyBindings(bindingFile)
+		bindingFiles, err := kubernetes.CountManifestFiles(bindingFile)
+		if err != nil {
+			return err
+		}
+		total := maxInt64(int64(policyFiles+bindingFiles), 1)
+		err = withProgress("Reading policies", total, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = kubernetes.GetLocalValidatingAdmissionPoliciesWithProgress(policyFile, func(string) {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			bindings, err = kubernetes.GetLocalValidatingAdmissionPolicyBindingsWithProgress(bindingFile, func(string) {
+				tracker.Increment(1)
+			})
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -215,13 +257,22 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		if allNamespaces {
 			scope = kubernetes.ResourceScopeAllNamespaces
 		}
-		remoteRes, remoteNS, err := kubernetes.FetchResourcesForPolicies(vaps, scope, namespaces)
+		total := maxInt64(int64(len(vaps)), 1)
+		err = withProgress("Fetching remote resources", total, progressEnabled, func(tracker *progress.Tracker) error {
+			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, scope, namespaces, func() {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			logging.Debugf("Loaded %d resources from cluster", len(remoteRes))
+			resources = append(resources, remoteRes...)
+			namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNS, namespaces, allNamespaces)
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		logging.Debugf("Loaded %d resources from cluster", len(remoteRes))
-		resources = append(resources, remoteRes...)
-		namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNS, namespaces, allNamespaces)
 	}
 
 	if len(resources) == 0 {
@@ -246,23 +297,8 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	hasFailures := false
 
 	totalWork := len(resources) * len(bindings)
-	pw := progress.NewWriter()
-	pw.SetOutputWriter(os.Stdout)
-	pw.SetAutoStop(false)
-	pw.SetTrackerLength(40)
-	pw.SetSortBy(progress.SortByNone)
-	pw.SetMessageWidth(28)
-	tracker := &progress.Tracker{
-		Message: "Validating resources",
-		Total:   maxInt64(int64(totalWork), 1),
-	}
-	pw.AppendTracker(tracker)
-	go pw.Render()
-	defer func() {
-		tracker.MarkAsDone()
-		pw.Stop()
-		fmt.Println()
-	}()
+	tracker, stop := startProgress("Validating resources", int64(totalWork), progressEnabled)
+	defer stop()
 
 	for i := range bindings {
 		binding := &bindings[i]
@@ -326,7 +362,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if err := renderReport(reportMode, output, reports, resourceTotals, resourceDetails); err != nil {
+	if err := renderReport(reportMode, format, reports, resourceTotals, resourceDetails, writer, tableStyle, useColor); err != nil {
 		return err
 	}
 
@@ -588,6 +624,42 @@ func actionsToStrings(actions []admissionregistrationv1.ValidationAction) []stri
 	return result
 }
 
+func startProgress(message string, total int64, enabled bool) (*progress.Tracker, func()) {
+	if !enabled {
+		tracker := &progress.Tracker{
+			Message: message,
+			Total:   maxInt64(total, 1),
+		}
+		return tracker, func() {}
+	}
+	pw := progress.NewWriter()
+	pw.SetOutputWriter(os.Stdout)
+	pw.SetAutoStop(false)
+	pw.SetTrackerLength(40)
+	pw.SetSortBy(progress.SortByNone)
+	pw.SetMessageWidth(28)
+
+	tracker := &progress.Tracker{
+		Message: message,
+		Total:   maxInt64(total, 1),
+	}
+	pw.AppendTracker(tracker)
+	go pw.Render()
+
+	stop := func() {
+		tracker.MarkAsDone()
+		pw.Stop()
+		fmt.Println()
+	}
+	return tracker, stop
+}
+
+func withProgress(message string, total int64, enabled bool, fn func(*progress.Tracker) error) error {
+	tracker, stop := startProgress(message, total, enabled)
+	defer stop()
+	return fn(tracker)
+}
+
 func resourceIdentifier(obj map[string]interface{}) string {
 	kind, _ := obj["kind"].(string)
 	namespace := kubernetes.GetMetadataString(obj, "namespace")
@@ -826,16 +898,16 @@ func countResourcesByKind(resources []map[string]interface{}) map[string]int {
 	return totals
 }
 
-func renderReport(reportMode, format string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail) error {
+func renderReport(reportMode, format string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail, w io.Writer, style table.Style, useColor bool) error {
 	switch format {
 	case "json":
-		return renderJSONReport(reportMode, reports, resourceTotals, resourceDetails)
+		return renderJSONReport(reportMode, reports, resourceTotals, resourceDetails, w)
 	case "table":
-		printSummaryTables(reports)
-		printResourceTotals(resourceTotals)
-		printResourceNames(resourceDetails)
+		printSummaryTables(reports, w, style)
+		printResourceTotals(resourceTotals, w, style)
+		printResourceNames(resourceDetails, w, style)
 		if reportMode == "all" {
-			printViolationLogs(reports)
+			printViolationLogs(reports, w, useColor)
 		}
 	default:
 		return fmt.Errorf("unsupported format %s", format)
@@ -843,7 +915,7 @@ func renderReport(reportMode, format string, reports []*bindingReport, resourceT
 	return nil
 }
 
-func renderJSONReport(reportMode string, reports []*bindingReport, resourceTotals map[string]int, details []resourceDetail) error {
+func renderJSONReport(reportMode string, reports []*bindingReport, resourceTotals map[string]int, details []resourceDetail, w io.Writer) error {
 	type jsonReport struct {
 		Report    string           `json:"report"`
 		Format    string           `json:"format"`
@@ -874,19 +946,19 @@ func renderJSONReport(reportMode string, reports []*bindingReport, resourceTotal
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(encoded))
+	fmt.Fprintln(w, string(encoded))
 	return nil
 }
 
-func printSummaryTables(reports []*bindingReport) {
+func printSummaryTables(reports []*bindingReport, w io.Writer, style table.Style) {
 	if len(reports) == 0 {
-		fmt.Println("No policies evaluated.")
+		fmt.Fprintln(w, "No policies evaluated.")
 		return
 	}
 
 	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(table.StyleRounded)
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
 	t.Style().Title.Align = text.AlignLeft
 
 	t.AppendHeader(table.Row{"Policy", "Binding", "Mode", "Total", "Compliant", "NonCompliant"})
@@ -900,18 +972,18 @@ func printSummaryTables(reports []*bindingReport) {
 	t.AppendSeparator()
 	t.AppendRow(table.Row{"Totals", "", "", totalTotal, totalCompliant, totalNon})
 	t.SetTitle("Policy Compliance Overview")
-	fmt.Println()
+	fmt.Fprintln(w)
 	t.Render()
 }
 
-func printResourceTotals(counts map[string]int) {
+func printResourceTotals(counts map[string]int, w io.Writer, style table.Style) {
 	if len(counts) == 0 {
 		return
 	}
 
 	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(table.StyleRounded)
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
 	t.SetTitle("Resources by Kind")
 	t.AppendHeader(table.Row{"Kind", "Total"})
 	kinds := make([]string, 0, len(counts))
@@ -922,7 +994,7 @@ func printResourceTotals(counts map[string]int) {
 	for _, kind := range kinds {
 		t.AppendRow(table.Row{kind, counts[kind]})
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 	t.Render()
 }
 
@@ -960,14 +1032,14 @@ func collectResourceDetails(resources []map[string]interface{}) []resourceDetail
 	return details
 }
 
-func printResourceNames(details []resourceDetail) {
+func printResourceNames(details []resourceDetail, w io.Writer, style table.Style) {
 	if len(details) == 0 {
 		return
 	}
 
 	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(table.StyleRounded)
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
 	t.SetTitle("Resources")
 	t.AppendHeader(table.Row{"Kind", "Namespace", "Name"})
 	for _, detail := range details {
@@ -977,24 +1049,28 @@ func printResourceNames(details []resourceDetail) {
 		}
 		t.AppendRow(table.Row{detail.Kind, ns, detail.Name})
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 	t.Render()
 }
 
-func printViolationLogs(reports []*bindingReport) {
-	fmt.Println("\nViolations")
+func printViolationLogs(reports []*bindingReport, w io.Writer, useColor bool) {
+	fmt.Fprintln(w, "\nViolations")
 	found := false
 	for _, br := range reports {
 		for _, violation := range br.Violations {
 			found = true
 			severity, formatter := violationSeverityColor(violation.Actions)
-			formatter.Printf("[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
-			fmt.Printf("Resource : %s\n", violation.Resource)
-			fmt.Printf("Message  : %s\n", violation.Message)
+			if useColor {
+				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
+			} else {
+				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
+			}
+			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
+			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
 		}
 	}
 	if !found {
-		fmt.Println("No violations detected.")
+		fmt.Fprintln(w, "No violations detected.")
 	}
 }
 func collectFiles(dir string) ([]string, error) {
@@ -1055,10 +1131,11 @@ func newValidatePSACmd() *cobra.Command {
 func runValidatePSA(cmd *cobra.Command, _ []string) error {
 	nsArg := cmd.Flags().Lookup("namespaces").Value.String()
 	allNamespaces := lookupBoolFlag(cmd, "all-namespaces")
-	output := strings.ToLower(cmd.Flags().Lookup("output").Value.String())
+	format := strings.ToLower(cmd.Flags().Lookup("format").Value.String())
+	outputPath := strings.TrimSpace(cmd.Flags().Lookup("output").Value.String())
 	report := strings.ToLower(cmd.Flags().Lookup("report").Value.String())
-	if output != "table" && output != "json" {
-		return fmt.Errorf("invalid output format %s, expected table or json", output)
+	if format != "table" && format != "json" {
+		return fmt.Errorf("invalid output format %s, expected table or json", format)
 	}
 	if report != "summary" && report != "all" {
 		return fmt.Errorf("invalid report type %s, expected summary or all", report)
@@ -1113,13 +1190,25 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, namespaces, allNamespaces)
 	hasViolations := false
 
-	switch output {
+	writer := io.Writer(os.Stdout)
+	style := table.StyleRounded
+	if outputPath != "" {
+		f, err := os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to open output file: %w", err)
+		}
+		defer f.Close()
+		writer = f
+		style = table.StyleDefault
+	}
+
+	switch format {
 	case "json":
-		if err := renderPSAJSON(results); err != nil {
+		if err := renderPSAJSON(results, writer); err != nil {
 			return err
 		}
 	default:
-		printPSATable(results, usesKolteq)
+		printPSATable(results, usesKolteq, writer, style)
 	}
 
 	if hasViolations && isPipeline(cmd) {
@@ -1218,19 +1307,19 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 	return sorted, usesKolteq
 }
 
-func renderPSAJSON(results []psaNamespaceResult) error {
+func renderPSAJSON(results []psaNamespaceResult, w io.Writer) error {
 	data, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(data))
+	fmt.Fprintln(w, string(data))
 	return nil
 }
 
-func printPSATable(results []psaNamespaceResult, kolteq bool) {
+func printPSATable(results []psaNamespaceResult, kolteq bool, w io.Writer, style table.Style) {
 	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(table.StyleRounded)
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
 	t.SetTitle("PSA Namespace Levels")
 	t.AppendHeader(table.Row{"Namespace", "Enforce", "Audit", "Warn"})
 	for _, res := range results {
@@ -1241,7 +1330,7 @@ func printPSATable(results []psaNamespaceResult, kolteq bool) {
 			formatPSAMode(res.Modes, res.Kolteq, "warn", kolteq),
 		})
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 	t.Render()
 }
 

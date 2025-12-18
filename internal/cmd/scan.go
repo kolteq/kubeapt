@@ -78,7 +78,7 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		})
 	}
 
-	printPSATable(results, namespaceLabelsUseKolteq(namespaceLabels))
+	printPSATable(results, namespaceLabelsUseKolteq(namespaceLabels), os.Stdout, table.StyleRounded)
 
 	vaps, err := kubernetes.GetRemoteValidatingAdmissionPolicies()
 	if err != nil {

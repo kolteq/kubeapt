@@ -21,7 +21,11 @@ import (
 )
 
 func GetLocalValidatingAdmissionPolicies(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
-	return loadPoliciesFromPath(path)
+	return loadPoliciesFromPath(path, nil)
+}
+
+func GetLocalValidatingAdmissionPoliciesWithProgress(path string, onFile func(string)) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
+	return loadPoliciesFromPath(path, onFile)
 }
 
 func GetRemoteValidatingAdmissionPolicies() ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
@@ -65,7 +69,11 @@ func GetRemoteValidatingAdmissionPolicyBindings() ([]admissionregistrationv1.Val
 }
 
 func GetLocalValidatingAdmissionPolicyBindings(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
-	return loadBindingsFromPath(path)
+	return loadBindingsFromPath(path, nil)
+}
+
+func GetLocalValidatingAdmissionPolicyBindingsWithProgress(path string, onFile func(string)) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+	return loadBindingsFromPath(path, onFile)
 }
 
 func readValidatingAdmissionPoliciesFromFile(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
@@ -162,7 +170,7 @@ func decodeValidatingAdmissionPolicyBindings(r io.Reader) ([]admissionregistrati
 	return bindings, nil
 }
 
-func loadPoliciesFromPath(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
+func loadPoliciesFromPath(path string, onFile func(string)) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -176,6 +184,9 @@ func loadPoliciesFromPath(path string) ([]admissionregistrationv1.ValidatingAdmi
 
 		var all []admissionregistrationv1.ValidatingAdmissionPolicy
 		for _, file := range files {
+			if onFile != nil {
+				onFile(file)
+			}
 			items, err := readValidatingAdmissionPoliciesFromFile(file)
 			if err != nil {
 				logging.Debugf("Skipping policy file %s: %v", file, err)
@@ -186,10 +197,13 @@ func loadPoliciesFromPath(path string) ([]admissionregistrationv1.ValidatingAdmi
 		return all, nil
 	}
 
+	if onFile != nil {
+		onFile(path)
+	}
 	return readValidatingAdmissionPoliciesFromFile(path)
 }
 
-func loadBindingsFromPath(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+func loadBindingsFromPath(path string, onFile func(string)) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -203,6 +217,9 @@ func loadBindingsFromPath(path string) ([]admissionregistrationv1.ValidatingAdmi
 
 		var all []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 		for _, file := range files {
+			if onFile != nil {
+				onFile(file)
+			}
 			items, err := readValidatingAdmissionPolicyBindingsFromFile(file)
 			if err != nil {
 				logging.Debugf("Skipping binding file %s: %v", file, err)
@@ -213,6 +230,9 @@ func loadBindingsFromPath(path string) ([]admissionregistrationv1.ValidatingAdmi
 		return all, nil
 	}
 
+	if onFile != nil {
+		onFile(path)
+	}
 	return readValidatingAdmissionPolicyBindingsFromFile(path)
 }
 
@@ -234,4 +254,22 @@ func collectManifestFiles(dir string) ([]string, error) {
 		files = append(files, filepath.Join(dir, name))
 	}
 	return files, nil
+}
+
+func CountManifestFiles(path string) (int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if info.IsDir() {
+		files, err := collectManifestFiles(path)
+		if err != nil {
+			return 0, err
+		}
+		if len(files) == 0 {
+			return 1, nil
+		}
+		return len(files), nil
+	}
+	return 1, nil
 }
