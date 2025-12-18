@@ -19,6 +19,10 @@ const (
 )
 
 func FetchResourcesForPolicies(policies []admissionregistrationv1.ValidatingAdmissionPolicy, scope ResourceScope, namespaces []string) ([]map[string]interface{}, map[string]map[string]string, error) {
+	return FetchResourcesForPoliciesWithProgress(policies, scope, namespaces, nil)
+}
+
+func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.ValidatingAdmissionPolicy, scope ResourceScope, namespaces []string, onPolicy func()) ([]map[string]interface{}, map[string]map[string]string, error) {
 	var all []map[string]interface{}
 	nsSet := map[string]struct{}{}
 	dedup := map[string]struct{}{}
@@ -26,6 +30,9 @@ func FetchResourcesForPolicies(policies []admissionregistrationv1.ValidatingAdmi
 	defaultNamespace := ActiveNamespace()
 
 	for _, policy := range policies {
+		if onPolicy != nil {
+			onPolicy()
+		}
 		if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) == 0 {
 			continue
 		}

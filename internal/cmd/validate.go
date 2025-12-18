@@ -173,11 +173,20 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 
 	if remotePolicies {
-		vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
-		if err != nil {
-			return err
-		}
-		bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+		err = withProgress("Fetching remote policies", 2, func(tracker *progress.Tracker) error {
+			vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
+			if err != nil {
+				return err
+			}
+			tracker.Increment(1)
+
+			bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+			if err != nil {
+				return err
+			}
+			tracker.Increment(1)
+			return nil
+		})
 		if err != nil {
 			return err
 		}
@@ -186,11 +195,27 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 			bindingFile = policyFile
 			logging.Debugf("No bindings path provided, reusing %s", policyFile)
 		}
-		vaps, err = kubernetes.GetLocalValidatingAdmissionPolicies(policyFile)
+		policyFiles, err := kubernetes.CountManifestFiles(policyFile)
 		if err != nil {
 			return err
 		}
-		bindings, err = kubernetes.GetLocalValidatingAdmissionPolicyBindings(bindingFile)
+		bindingFiles, err := kubernetes.CountManifestFiles(bindingFile)
+		if err != nil {
+			return err
+		}
+		total := maxInt64(int64(policyFiles+bindingFiles), 1)
+		err = withProgress("Reading policies", total, func(tracker *progress.Tracker) error {
+			vaps, err = kubernetes.GetLocalValidatingAdmissionPoliciesWithProgress(policyFile, func(string) {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			bindings, err = kubernetes.GetLocalValidatingAdmissionPolicyBindingsWithProgress(bindingFile, func(string) {
+				tracker.Increment(1)
+			})
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -215,13 +240,22 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		if allNamespaces {
 			scope = kubernetes.ResourceScopeAllNamespaces
 		}
-		remoteRes, remoteNS, err := kubernetes.FetchResourcesForPolicies(vaps, scope, namespaces)
+		total := maxInt64(int64(len(vaps)), 1)
+		err = withProgress("Fetching remote resources", total, func(tracker *progress.Tracker) error {
+			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, scope, namespaces, func() {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			logging.Debugf("Loaded %d resources from cluster", len(remoteRes))
+			resources = append(resources, remoteRes...)
+			namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNS, namespaces, allNamespaces)
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		logging.Debugf("Loaded %d resources from cluster", len(remoteRes))
-		resources = append(resources, remoteRes...)
-		namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNS, namespaces, allNamespaces)
 	}
 
 	if len(resources) == 0 {
@@ -246,23 +280,8 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	hasFailures := false
 
 	totalWork := len(resources) * len(bindings)
-	pw := progress.NewWriter()
-	pw.SetOutputWriter(os.Stdout)
-	pw.SetAutoStop(false)
-	pw.SetTrackerLength(40)
-	pw.SetSortBy(progress.SortByNone)
-	pw.SetMessageWidth(28)
-	tracker := &progress.Tracker{
-		Message: "Validating resources",
-		Total:   maxInt64(int64(totalWork), 1),
-	}
-	pw.AppendTracker(tracker)
-	go pw.Render()
-	defer func() {
-		tracker.MarkAsDone()
-		pw.Stop()
-		fmt.Println()
-	}()
+	tracker, stop := startProgress("Validating resources", int64(totalWork))
+	defer stop()
 
 	for i := range bindings {
 		binding := &bindings[i]
@@ -586,6 +605,35 @@ func actionsToStrings(actions []admissionregistrationv1.ValidationAction) []stri
 		result[i] = string(action)
 	}
 	return result
+}
+
+func startProgress(message string, total int64) (*progress.Tracker, func()) {
+	pw := progress.NewWriter()
+	pw.SetOutputWriter(os.Stdout)
+	pw.SetAutoStop(false)
+	pw.SetTrackerLength(40)
+	pw.SetSortBy(progress.SortByNone)
+	pw.SetMessageWidth(28)
+
+	tracker := &progress.Tracker{
+		Message: message,
+		Total:   maxInt64(total, 1),
+	}
+	pw.AppendTracker(tracker)
+	go pw.Render()
+
+	stop := func() {
+		tracker.MarkAsDone()
+		pw.Stop()
+		fmt.Println()
+	}
+	return tracker, stop
+}
+
+func withProgress(message string, total int64, fn func(*progress.Tracker) error) error {
+	tracker, stop := startProgress(message, total)
+	defer stop()
+	return fn(tracker)
 }
 
 func resourceIdentifier(obj map[string]interface{}) string {
