@@ -19,6 +19,13 @@ Alternatively run from source within this repository:
 go run ./main.go <command>
 ```
 
+### Docker
+
+```
+docker build -t kubeapt .
+docker run -it --rm --name kubeapt --net=host -v <PATH_TO_KUBECONFIG>:<PATH_TO_KUBECONFIG> kubeapt --kubeconfig <PATH_TO_KUBECONFIG> <scan/validate>
+```
+
 ## Usage
 Top-level commands:
 - `validate vap` – evaluate ValidatingAdmissionPolicies/Bindings
