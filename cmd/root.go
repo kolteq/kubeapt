@@ -39,6 +39,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.AddCommand(cmd.ValidateCmd(getLogLevel))
 	rootCmd.AddCommand(cmd.ScanCmd())
+	rootCmd.AddCommand(cmd.PoliciesCmd())
 }
 
 func getLogLevel() string {
