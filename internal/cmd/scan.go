@@ -14,6 +14,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/cobra"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeclient "k8s.io/client-go/kubernetes"
 
@@ -62,25 +63,59 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 	}
 
 	namespaceLabels := make(map[string]map[string]string, len(nsList.Items))
-	var results []psaNamespaceResult
-
 	for _, ns := range nsList.Items {
-		nsLabels := convertPSANamespaceLabels(ns.Labels)
-		namespaceLabels[ns.Name] = nsLabels
-		results = append(results, psaNamespaceResult{
-			Namespace: ns.Name,
-			Modes:     convertPSALabels(nsLabels),
-			Kolteq: map[string]bool{
-				"enforce": hasKolteqMode(nsLabels, "enforce"),
-				"audit":   hasKolteqMode(nsLabels, "audit"),
-				"warn":    hasKolteqMode(nsLabels, "warn"),
-			},
-		})
+		namespaceLabels[ns.Name] = convertPSANamespaceLabels(ns.Labels)
 	}
 
-	printPSATable(results, namespaceLabelsUseKolteq(namespaceLabels), os.Stdout, table.StyleRounded)
+	policiesPath, bindingsPath, ok, err := locatePSAPolicies()
+	if err != nil {
+		return err
+	}
 
-	vaps, err := kubernetes.GetRemoteValidatingAdmissionPolicies()
+	var (
+		resources  []map[string]interface{}
+		pods       []corev1.Pod
+		compliance = map[string]psaComplianceCounts{}
+		vaps       []admissionv1.ValidatingAdmissionPolicy
+		bindings   []admissionv1.ValidatingAdmissionPolicyBinding
+	)
+
+	if ok {
+		vaps, bindings, err = loadPSAPolicies(policiesPath, bindingsPath)
+		if err != nil {
+			return err
+		}
+		if len(vaps) > 0 && len(bindings) > 0 {
+			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPolicies(vaps, kubernetes.ResourceScopeAllNamespaces, nil)
+			if err != nil {
+				return err
+			}
+			resources = append(resources, remoteRes...)
+			namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
+		}
+
+		pods, err = extractPodsFromResources(resources)
+		if err != nil {
+			return err
+		}
+		compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, "")
+		if err != nil {
+			return err
+		}
+	} else {
+		root, err := psaPoliciesDir()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "PSA policy bundle not found in %s. Run `kubeapt policies psa download` to install.\n", root)
+	}
+
+	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
+	printPSATable(results, usesKolteq, os.Stdout, table.StyleRounded)
+	fmt.Fprintln(os.Stdout, "For details run `kubeapt validate psa --remote-namespaces --all-namespaces --report all`")
+	fmt.Fprintln(os.Stdout)
+
+	vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
 	if err != nil {
 		fmt.Printf("Error fetching ValidatingAdmissionPolicies: %v\n", err)
 	} else if len(vaps) > 0 {
