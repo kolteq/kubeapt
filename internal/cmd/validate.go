@@ -1125,6 +1125,7 @@ func newValidatePSACmd() *cobra.Command {
 	cmd.Flags().StringP("resources", "r", "", "Path to resource manifest file or directory")
 	cmd.Flags().Bool("remote-namespaces", false, "Fetch namespace labels from the Kubernetes API")
 	cmd.Flags().String("report", "summary", "Report type: summary or all")
+	cmd.Flags().String("level", "", "PSS level to evaluate: baseline or restricted")
 	return cmd
 }
 
@@ -1134,11 +1135,15 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 	format := strings.ToLower(cmd.Flags().Lookup("format").Value.String())
 	outputPath := strings.TrimSpace(cmd.Flags().Lookup("output").Value.String())
 	report := strings.ToLower(cmd.Flags().Lookup("report").Value.String())
+	level := strings.ToLower(strings.TrimSpace(cmd.Flags().Lookup("level").Value.String()))
 	if format != "table" && format != "json" {
 		return fmt.Errorf("invalid output format %s, expected table or json", format)
 	}
 	if report != "summary" && report != "all" {
 		return fmt.Errorf("invalid report type %s, expected summary or all", report)
+	}
+	if level != "" && level != "baseline" && level != "restricted" {
+		return fmt.Errorf("invalid level %s, expected baseline or restricted", level)
 	}
 
 	resourcePath := cmd.Flags().Lookup("resources").Value.String()
@@ -1164,6 +1169,7 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 
 	namespaceLabels := make(map[string]map[string]string)
 	var pods []corev1.Pod
+	var resources []map[string]interface{}
 
 	if resourcePath != "" {
 		localRes, localNS, err := loadLocalResources(resourcePath)
@@ -1172,6 +1178,7 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 		}
 		localRes = filterResourcesByNamespaces(localRes, namespaces, allNamespaces)
 		namespaceLabels = mergeLabelMaps(namespaceLabels, localNS)
+		resources = append(resources, localRes...)
 		localPods, err := extractPodsFromResources(localRes)
 		if err != nil {
 			return err
@@ -1187,8 +1194,55 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 		namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
 	}
 
-	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, namespaces, allNamespaces)
+	policiesPath, bindingsPath, ok, err := locatePSAPolicies()
+	if err != nil {
+		return err
+	}
+	compliance := map[string]psaComplianceCounts{}
+	vaps := []admissionregistrationv1.ValidatingAdmissionPolicy{}
+	bindings := []admissionregistrationv1.ValidatingAdmissionPolicyBinding{}
+	if ok {
+		vaps, bindings, err = loadPSAPolicies(policiesPath, bindingsPath)
+		if err != nil {
+			return err
+		}
+		if resourcePath == "" && remoteNamespaces {
+			scope := kubernetes.ResourceScopeSelected
+			if allNamespaces {
+				scope = kubernetes.ResourceScopeAllNamespaces
+			}
+			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPolicies(vaps, scope, namespaces)
+			if err != nil {
+				return err
+			}
+			resources = append(resources, remoteRes...)
+			namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
+			remotePods, err := extractPodsFromResources(remoteRes)
+			if err != nil {
+				return err
+			}
+			pods = append(pods, remotePods...)
+		}
+		compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, level)
+		if err != nil {
+			return err
+		}
+	} else {
+		root, err := psaPoliciesDir()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "PSA policy bundle not found in %s. Run `kubeapt policies psa download` to install.\n", root)
+	}
+
+	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, namespaces, allNamespaces, compliance)
 	hasViolations := false
+	for _, res := range results {
+		if res.NonCompliant > 0 {
+			hasViolations = true
+			break
+		}
+	}
 
 	writer := io.Writer(os.Stdout)
 	style := table.StyleRounded
@@ -1204,11 +1258,14 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 
 	switch format {
 	case "json":
-		if err := renderPSAJSON(results, writer); err != nil {
+		if err := renderPSAJSON(report, results, writer); err != nil {
 			return err
 		}
 	default:
 		printPSATable(results, usesKolteq, writer, style)
+		if report == "all" {
+			printPSAViolationLogs(results, writer, false)
+		}
 	}
 
 	if hasViolations && isPipeline(cmd) {
@@ -1219,14 +1276,16 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 }
 
 type psaNamespaceResult struct {
-	Namespace  string            `json:"namespace"`
-	Modes      map[string]string `json:"modes"`
-	Pods       int               `json:"podsChecked"`
-	Kolteq     map[string]bool   `json:"-"`
-	Violations []string          `json:"violations"`
+	Namespace    string            `json:"namespace"`
+	Modes        map[string]string `json:"modes"`
+	Pods         int               `json:"podsChecked"`
+	Compliant    int               `json:"compliant"`
+	NonCompliant int               `json:"nonCompliant"`
+	Kolteq       map[string]bool   `json:"-"`
+	Violations   []violationDetail `json:"violations,omitempty"`
 }
 
-func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string]string, namespaces []string, all bool) ([]psaNamespaceResult, bool) {
+func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string]string, namespaces []string, all bool, compliance map[string]psaComplianceCounts) ([]psaNamespaceResult, bool) {
 	results := make(map[string]*psaNamespaceResult)
 	usesKolteq := namespaceLabelsUseKolteq(namespaceLabels)
 	target := make(map[string]struct{})
@@ -1250,6 +1309,11 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 		labels = convertPSANamespaceLabels(labels)
 		kolteqModes := make(map[string]bool)
 		for _, mode := range []string{"enforce", "audit", "warn"} {
+			if _, ok := labels["pss.security.kolteq.com/"+mode]; ok {
+				kolteqModes[mode] = true
+				usesKolteq = true
+				continue
+			}
 			if _, ok := labels["pss.kolteq.com/"+mode]; ok {
 				kolteqModes[mode] = true
 				usesKolteq = true
@@ -1296,6 +1360,16 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 		}
 	}
 
+	for ns, counts := range compliance {
+		if !includeNamespace(ns) {
+			continue
+		}
+		res := addNamespace(ns, namespaceLabels[ns])
+		res.Compliant = counts.Compliant
+		res.NonCompliant = counts.NonCompliant
+		res.Violations = counts.Violations
+	}
+
 	var sorted []psaNamespaceResult
 	for _, res := range results {
 		sorted = append(sorted, *res)
@@ -1307,8 +1381,18 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 	return sorted, usesKolteq
 }
 
-func renderPSAJSON(results []psaNamespaceResult, w io.Writer) error {
-	data, err := json.MarshalIndent(results, "", "  ")
+func renderPSAJSON(report string, results []psaNamespaceResult, w io.Writer) error {
+	payload := make([]psaNamespaceResult, 0, len(results))
+	for _, res := range results {
+		copyRes := res
+		if report != "all" {
+			copyRes.Violations = nil
+		} else {
+			copyRes.Violations = mergePSAViolations(copyRes.Violations)
+		}
+		payload = append(payload, copyRes)
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1321,17 +1405,153 @@ func printPSATable(results []psaNamespaceResult, kolteq bool, w io.Writer, style
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
 	t.SetTitle("PSA Namespace Levels")
-	t.AppendHeader(table.Row{"Namespace", "Enforce", "Audit", "Warn"})
+	t.AppendHeader(table.Row{"Namespace", "Enforce", "Audit", "Warn", "Compliant", "Incompliant"})
+	var totalCompliant, totalNonCompliant int
 	for _, res := range results {
 		t.AppendRow(table.Row{
 			res.Namespace,
 			formatPSAMode(res.Modes, res.Kolteq, "enforce", kolteq),
 			formatPSAMode(res.Modes, res.Kolteq, "audit", kolteq),
 			formatPSAMode(res.Modes, res.Kolteq, "warn", kolteq),
+			res.Compliant,
+			res.NonCompliant,
 		})
+		totalCompliant += res.Compliant
+		totalNonCompliant += res.NonCompliant
+	}
+	if len(results) > 0 {
+		t.AppendSeparator()
+		t.AppendRow(table.Row{"Totals", "", "", "", totalCompliant, totalNonCompliant})
 	}
 	fmt.Fprintln(w)
 	t.Render()
+}
+
+func printPSAViolationLogs(results []psaNamespaceResult, w io.Writer, useColor bool) {
+	fmt.Fprintln(w, "\nViolations")
+	found := false
+	for _, res := range results {
+		for _, violation := range mergePSAViolations(res.Violations) {
+			found = true
+			_, formatter := violationSeverityColor(violation.Actions)
+			label := strings.ToUpper(strings.Join(formatViolationActions(violation.Actions), "/"))
+			if useColor {
+				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
+			} else {
+				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
+			}
+			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
+			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
+			if violation.Path != "" {
+				fmt.Fprintf(w, "Path     : %s\n", violation.Path)
+			}
+		}
+	}
+	if !found {
+		fmt.Fprintln(w, "No violations detected.")
+	}
+}
+
+func mergePSAViolations(violations []violationDetail) []violationDetail {
+	type agg struct {
+		detail      violationDetail
+		actionSet   map[string]struct{}
+		bestAction  int
+		seenBinding bool
+	}
+	aggMap := make(map[string]*agg)
+	for _, v := range violations {
+		base := psaBindingBase(v.Binding)
+		key := strings.Join([]string{v.Policy, base, v.Resource, v.Message, v.Path}, "|")
+		entry, ok := aggMap[key]
+		if !ok {
+			entry = &agg{
+				detail:    violationDetail{Policy: v.Policy, Binding: v.Binding, Resource: v.Resource, Message: v.Message, Path: v.Path},
+				actionSet: make(map[string]struct{}),
+			}
+			aggMap[key] = entry
+		}
+		for _, action := range v.Actions {
+			canonical := canonicalAction(action)
+			entry.actionSet[canonical] = struct{}{}
+			if priority := actionPriority(canonical); priority > entry.bestAction {
+				entry.bestAction = priority
+				entry.detail.Binding = v.Binding
+				entry.seenBinding = true
+			}
+		}
+		if !entry.seenBinding {
+			entry.detail.Binding = v.Binding
+		}
+	}
+
+	merged := make([]violationDetail, 0, len(aggMap))
+	for _, entry := range aggMap {
+		entry.detail.Actions = formatViolationActionsFromSet(entry.actionSet)
+		merged = append(merged, entry.detail)
+	}
+	return merged
+}
+
+func psaBindingBase(name string) string {
+	for _, suffix := range []string{"-deny", "-audit", "-warn"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return name
+}
+
+func canonicalAction(action string) string {
+	switch strings.ToLower(action) {
+	case "deny":
+		return "Deny"
+	case "warn":
+		return "Warn"
+	case "audit":
+		return "Audit"
+	default:
+		return action
+	}
+}
+
+func actionPriority(action string) int {
+	switch strings.ToLower(action) {
+	case "deny":
+		return 3
+	case "audit":
+		return 2
+	case "warn":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func formatViolationActions(actions []string) []string {
+	return formatViolationActionsFromSet(listToSet(actions))
+}
+
+func formatViolationActionsFromSet(actions map[string]struct{}) []string {
+	ordered := make([]string, 0, len(actions))
+	for _, action := range []string{"Deny", "Warn", "Audit"} {
+		if _, ok := actions[action]; ok {
+			ordered = append(ordered, action)
+			delete(actions, action)
+		}
+	}
+	for action := range actions {
+		ordered = append(ordered, action)
+	}
+	return ordered
+}
+
+func listToSet(actions []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(actions))
+	for _, action := range actions {
+		set[canonicalAction(action)] = struct{}{}
+	}
+	return set
 }
 
 func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode string, kolteq bool) string {
@@ -1358,8 +1578,8 @@ func convertPSALabels(labels map[string]string) map[string]string {
 		switch {
 		case strings.HasPrefix(k, "pod-security.kubernetes.io/"):
 			canonical = strings.TrimPrefix(k, "pod-security.kubernetes.io/")
-		case strings.HasPrefix(k, "pss.kolteq.com/"):
-			canonical = strings.TrimPrefix(k, "pss.kolteq.com/")
+		case strings.HasPrefix(k, "pss.security.kolteq.com/"):
+			canonical = strings.TrimPrefix(k, "pss.security.kolteq.com/")
 		default:
 			continue
 		}
@@ -1377,7 +1597,7 @@ func convertPSALabels(labels map[string]string) map[string]string {
 func namespaceLabelsUseKolteq(labels map[string]map[string]string) bool {
 	for _, nsLabels := range labels {
 		for k := range nsLabels {
-			if strings.HasPrefix(k, "pss.kolteq.com/") {
+			if strings.Contains(k, "pss.security.kolteq.com/") {
 				return true
 			}
 		}
@@ -1389,8 +1609,12 @@ func hasKolteqMode(labels map[string]string, mode string) bool {
 	if labels == nil {
 		return false
 	}
-	_, ok := labels["pss.kolteq.com/"+mode]
-	return ok
+	for k := range labels {
+		if strings.HasSuffix(k, "/"+mode) && strings.Contains(k, "pss.security.kolteq.com/") {
+			return true
+		}
+	}
+	return false
 }
 
 func convertPSANamespaceLabels(labels map[string]string) map[string]string {

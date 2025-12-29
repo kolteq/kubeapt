@@ -16,11 +16,16 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+
+	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
 
 const (
 	psaPoliciesArchiveURL = "https://github.com/kolteq/validating-admission-policies-pss/archive/refs/heads/main.tar.gz"
 	psaPoliciesDirName    = "pod-security-standards"
+	psaPoliciesSubdir     = "policies"
+	psaBindingsSubdir     = "bindings"
 )
 
 func PoliciesCmd() *cobra.Command {
@@ -70,6 +75,125 @@ func psaPoliciesDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(configDir, "kubeapt", psaPoliciesDirName), nil
+}
+
+func psaPoliciesPath() (string, error) {
+	root, err := psaPoliciesDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, psaPoliciesSubdir), nil
+}
+
+func psaBindingsPath() (string, error) {
+	root, err := psaPoliciesDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, psaBindingsSubdir), nil
+}
+
+func locatePSAPolicies() (string, string, bool, error) {
+	policiesPath, err := psaPoliciesPath()
+	if err != nil {
+		return "", "", false, err
+	}
+	info, err := os.Stat(policiesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return policiesPath, "", false, nil
+		}
+		return "", "", false, err
+	}
+	if !info.IsDir() {
+		return "", "", false, fmt.Errorf("psa policies path %s is not a directory", policiesPath)
+	}
+
+	bindingsPath, err := psaBindingsPath()
+	if err != nil {
+		return "", "", false, err
+	}
+	if info, err := os.Stat(bindingsPath); err == nil && info.IsDir() {
+		return policiesPath, bindingsPath, true, nil
+	}
+	return policiesPath, policiesPath, true, nil
+}
+
+func loadPSAPolicies(policiesPath, bindingsPath string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, []admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+	policyFiles, err := collectManifestFilesRecursive(policiesPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	policies, err := loadPoliciesFromFiles(policyFiles)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	bindingFiles := policyFiles
+	if bindingsPath != policiesPath {
+		bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	bindings, err := loadBindingsFromFiles(bindingFiles)
+	if err != nil {
+		return nil, nil, err
+	}
+	return policies, bindings, nil
+}
+
+func loadPoliciesFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
+	var policies []admissionregistrationv1.ValidatingAdmissionPolicy
+	for _, file := range files {
+		items, err := kubernetes.GetLocalValidatingAdmissionPolicies(file)
+		if err != nil {
+			return nil, err
+		}
+		policies = append(policies, items...)
+	}
+	return policies, nil
+}
+
+func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	for _, file := range files {
+		items, err := kubernetes.GetLocalValidatingAdmissionPolicyBindings(file)
+		if err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, items...)
+	}
+	return bindings, nil
+}
+
+func collectManifestFilesRecursive(root string) ([]string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []string{root}, nil
+	}
+	var files []string
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(entry.Name())
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".json") {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 func downloadPSAPolicies(dest string) error {
