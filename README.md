@@ -11,7 +11,7 @@ Kubeapt is a command-line utility by KolTEQ GmbH that validates Kubernetes admis
 
 ## Installation
 ```bash
-go install github.com/kolteq/kubeapt@v0.1.1
+go install github.com/kolteq/kubeapt@v0.1.2
 ```
 
 Alternatively run from source within this repository:
@@ -31,6 +31,7 @@ Top-level commands:
 - `validate vap` – evaluate ValidatingAdmissionPolicies/Bindings
 - `validate psa` – summarize Pod Security Admission levels per namespace (KolTEQ labels highlighted)
 - `scan` – inspect a cluster for admission hardening components
+- `policies` - download policies for scanning
 
 Global flags shared by validate subcommands:
 - `--pipeline` – non-zero exit on violations (intended for CI/CD)
