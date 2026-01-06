@@ -16,7 +16,7 @@ var (
 	rootCmd = &cobra.Command{
 		Use:   "kubeapt",
 		Short: "Kubernetes Admission Policy Toolkit",
-		Long: `CLI toolkit for validating Kubernetes admission policies, Pod Security Admission labels, and cluster webhook safeguards.`,
+		Long:  `CLI toolkit for validating Kubernetes admission policies, Pod Security Admission labels, and cluster webhook safeguards.`,
 	}
 	logLevel       string
 	kubeconfigPath string
