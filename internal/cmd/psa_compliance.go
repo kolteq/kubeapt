@@ -4,7 +4,9 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"sync"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
@@ -34,6 +36,23 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 	status := make(map[string]bool)
 	resourceNamespace := make(map[string]string)
 
+	var progressCh chan struct{}
+	var progressDone chan struct{}
+	if onProgress != nil {
+		progressCh = make(chan struct{}, 256)
+		progressDone = make(chan struct{})
+		go func() {
+			for range progressCh {
+				onProgress()
+			}
+			close(progressDone)
+		}()
+		defer func() {
+			close(progressCh)
+			<-progressDone
+		}()
+	}
+
 	for i := range bindings {
 		binding := &bindings[i]
 		policy, ok := policyIndex[binding.Spec.PolicyName]
@@ -41,58 +60,112 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 			return nil, fmt.Errorf("binding %s references missing policy %s", binding.Name, binding.Spec.PolicyName)
 		}
 
-		for _, resource := range resources {
-			if onProgress != nil {
-				onProgress()
-			}
-			nsName := kubernetes.GetMetadataString(resource, "namespace")
-			if nsName == "" {
-				nsName = kubernetes.ActiveNamespace()
-			}
-			if nsName == "" {
-				nsName = "default"
-			}
-			nsLabels, nsKnown := expandedLabels[nsName]
-			if level != "" {
-				nsLabels = applyPSALevelLabels(nsLabels, level)
-				nsKnown = true
-			}
+		var mu sync.Mutex
+		ctx, cancel := context.WithCancel(context.Background())
+		workers := workerLimit(len(resources))
+		tasks := make(chan map[string]interface{}, workers*2)
+		errCh := make(chan error, 1)
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case resource, ok := <-tasks:
+						if !ok {
+							return
+						}
+						if progressCh != nil {
+							progressCh <- struct{}{}
+						}
+						nsName := kubernetes.GetMetadataString(resource, "namespace")
+						if nsName == "" {
+							nsName = kubernetes.ActiveNamespace()
+						}
+						if nsName == "" {
+							nsName = "default"
+						}
+						nsLabels, nsKnown := expandedLabels[nsName]
+						if level != "" {
+							nsLabels = applyPSALevelLabels(nsLabels, level)
+							nsKnown = true
+						}
 
-			if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
-				continue
-			}
-			if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, ignoreSelectors, ignoreSelectors) {
-				continue
-			}
+						if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
+							continue
+						}
+						if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, ignoreSelectors, ignoreSelectors) {
+							continue
+						}
 
-			id := resourceIdentifier(resource)
-			matched[id] = struct{}{}
-			resourceNamespace[id] = nsName
-			if _, ok := status[id]; !ok {
-				status[id] = true
-			}
+						result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
+						if err != nil {
+							select {
+							case errCh <- err:
+							default:
+							}
+							cancel()
+							return
+						}
 
-			result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
-			if err != nil {
-				return nil, err
-			}
-			if !result.Compliant {
-				status[id] = false
-				resName := describeResource(resource)
-				for _, violation := range result.Violations {
-					detail := violationDetail{
-						Policy:   policy.Name,
-						Binding:  binding.Name,
-						Resource: resName,
-						Message:  violation.Message,
-						Path:     violation.Path,
-						Actions:  violation.Actions,
+						id := resourceIdentifier(resource)
+						if result.Compliant {
+							mu.Lock()
+							matched[id] = struct{}{}
+							resourceNamespace[id] = nsName
+							if _, ok := status[id]; !ok {
+								status[id] = true
+							}
+							mu.Unlock()
+							continue
+						}
+
+						resName := describeResource(resource)
+						violations := make([]violationDetail, len(result.Violations))
+						for i, violation := range result.Violations {
+							violations[i] = violationDetail{
+								Policy:   policy.Name,
+								Binding:  binding.Name,
+								Resource: resName,
+								Message:  violation.Message,
+								Path:     violation.Path,
+								Actions:  violation.Actions,
+							}
+						}
+						mu.Lock()
+						matched[id] = struct{}{}
+						resourceNamespace[id] = nsName
+						if _, ok := status[id]; !ok {
+							status[id] = true
+						}
+						status[id] = false
+						nsResult := results[nsName]
+						nsResult.Violations = append(nsResult.Violations, violations...)
+						results[nsName] = nsResult
+						mu.Unlock()
 					}
-					nsResult := results[nsName]
-					nsResult.Violations = append(nsResult.Violations, detail)
-					results[nsName] = nsResult
 				}
+			}()
+		}
+
+	resourceLoop:
+		for _, resource := range resources {
+			select {
+			case <-ctx.Done():
+				break resourceLoop
+			case tasks <- resource:
 			}
+		}
+		close(tasks)
+		wg.Wait()
+		cancel()
+		select {
+		case err := <-errCh:
+			return nil, err
+		default:
 		}
 	}
 
