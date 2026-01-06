@@ -6,6 +6,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,31 +26,97 @@ func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.Va
 	allowed := buildNamespaceFilter(namespaces)
 	defaultNamespace := ActiveNamespace()
 
-	for _, policy := range policies {
+	if len(policies) > 0 {
+		workers := workerLimit(len(policies))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		tasks := make(chan admissionregistrationv1.ValidatingAdmissionPolicy, workers*2)
+		errCh := make(chan error, 1)
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+
+		var progressCh chan struct{}
+		var progressDone chan struct{}
 		if onPolicy != nil {
-			onPolicy()
+			progressCh = make(chan struct{}, 256)
+			progressDone = make(chan struct{})
+			go func() {
+				for range progressCh {
+					onPolicy()
+				}
+				close(progressDone)
+			}()
+			defer func() {
+				close(progressCh)
+				<-progressDone
+			}()
 		}
-		if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) == 0 {
-			continue
+
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case policy, ok := <-tasks:
+						if !ok {
+							return
+						}
+						if progressCh != nil {
+							progressCh <- struct{}{}
+						}
+						if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) == 0 {
+							continue
+						}
+						remote, err := FetchRemoteResourcesForRules(policy.Spec.MatchConstraints.ResourceRules)
+						if err != nil {
+							select {
+							case errCh <- err:
+							default:
+							}
+							cancel()
+							return
+						}
+						for _, obj := range remote {
+							ns := GetMetadataString(obj, "namespace")
+							if !namespaceAllowed(ns, scope, allowed, defaultNamespace) {
+								continue
+							}
+							key := resourceKey(obj)
+							mu.Lock()
+							if _, ok := dedup[key]; ok {
+								mu.Unlock()
+								continue
+							}
+							dedup[key] = struct{}{}
+							all = append(all, obj)
+							if ns != "" {
+								nsSet[ns] = struct{}{}
+							}
+							mu.Unlock()
+						}
+					}
+				}
+			}()
 		}
-		remote, err := FetchRemoteResourcesForRules(policy.Spec.MatchConstraints.ResourceRules)
-		if err != nil {
+
+	policyLoop:
+		for _, policy := range policies {
+			select {
+			case <-ctx.Done():
+				break policyLoop
+			case tasks <- policy:
+			}
+		}
+		close(tasks)
+		wg.Wait()
+
+		select {
+		case err := <-errCh:
 			return nil, nil, err
-		}
-		for _, obj := range remote {
-			ns := GetMetadataString(obj, "namespace")
-			if !namespaceAllowed(ns, scope, allowed, defaultNamespace) {
-				continue
-			}
-			key := resourceKey(obj)
-			if _, ok := dedup[key]; ok {
-				continue
-			}
-			dedup[key] = struct{}{}
-			all = append(all, obj)
-			if ns != "" {
-				nsSet[ns] = struct{}{}
-			}
+		default:
 		}
 	}
 

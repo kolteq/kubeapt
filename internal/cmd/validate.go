@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/fatih/color"
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -294,11 +295,22 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	}
 
 	var reports []*bindingReport
-	hasFailures := false
 
 	totalWork := len(resources) * len(bindings)
 	tracker, stop := startProgress("Validating resources", int64(totalWork), progressEnabled)
 	defer stop()
+	progressCh := make(chan struct{}, 256)
+	progressDone := make(chan struct{})
+	go func() {
+		for range progressCh {
+			tracker.Increment(1)
+		}
+		close(progressDone)
+	}()
+	defer func() {
+		close(progressCh)
+		<-progressDone
+	}()
 
 	for i := range bindings {
 		binding := &bindings[i]
@@ -316,48 +328,95 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 
 		logging.Debugf("Evaluating binding %s targeting policy %s", binding.Name, policy.Name)
 		matched := false
-		for _, resource := range resources {
-			nsName := kubernetes.GetMetadataString(resource, "namespace")
-			nsLabels, nsKnown := namespaceLabels[nsName]
-
-			tracker.Increment(1)
-
-			if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
-				continue
-			}
-			ignoreNS := ignoreSelectors
-			if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, ignoreNS, ignoreSelectors) {
-				continue
-			}
-
-			matched = true
-			logging.Debugf("  Matched %s", describeResource(resource))
-			bReport.Total++
-			result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
-			if err != nil {
-				return err
-			}
-			if result.Compliant {
-				bReport.Compliant++
-			} else {
-				bReport.NonCompliant++
-				hasFailures = true
-				resName := describeResource(resource)
-				for _, violation := range result.Violations {
-					detail := violationDetail{
-						Policy:   policy.Name,
-						Binding:  binding.Name,
-						Resource: resName,
-						Message:  violation.Message,
-						Path:     violation.Path,
-						Actions:  violation.Actions,
+		var mu sync.Mutex
+		ctx, cancel := context.WithCancel(context.Background())
+		workers := workerLimit(len(resources))
+		tasks := make(chan map[string]interface{}, workers*2)
+		errCh := make(chan error, 1)
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case resource, ok := <-tasks:
+						if !ok {
+							return
+						}
+						progressCh <- struct{}{}
+						nsName := kubernetes.GetMetadataString(resource, "namespace")
+						nsLabels, nsKnown := namespaceLabels[nsName]
+						if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
+							continue
+						}
+						if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, ignoreSelectors, ignoreSelectors) {
+							continue
+						}
+						resName := describeResource(resource)
+						logging.Debugf("  Matched %s", resName)
+						result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
+						if err != nil {
+							select {
+							case errCh <- err:
+							default:
+							}
+							cancel()
+							return
+						}
+						if result.Compliant {
+							mu.Lock()
+							matched = true
+							bReport.Total++
+							bReport.Compliant++
+							mu.Unlock()
+							continue
+						}
+						violations := make([]violationDetail, len(result.Violations))
+						for i, violation := range result.Violations {
+							violations[i] = violationDetail{
+								Policy:   policy.Name,
+								Binding:  binding.Name,
+								Resource: resName,
+								Message:  violation.Message,
+								Path:     violation.Path,
+								Actions:  violation.Actions,
+							}
+						}
+						mu.Lock()
+						matched = true
+						bReport.Total++
+						bReport.NonCompliant++
+						bReport.Violations = append(bReport.Violations, violations...)
+						mu.Unlock()
 					}
-					bReport.Violations = append(bReport.Violations, detail)
 				}
-			}
+			}()
 		}
 
-		if !matched {
+	resourceLoop:
+		for _, resource := range resources {
+			select {
+			case <-ctx.Done():
+				break resourceLoop
+			case tasks <- resource:
+			}
+		}
+		close(tasks)
+		wg.Wait()
+		cancel()
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
+
+		mu.Lock()
+		matchedNow := matched
+		mu.Unlock()
+		if !matchedNow {
 			logging.Debugf("  No resources matched binding %s", binding.Name)
 		}
 	}
@@ -366,6 +425,13 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	hasFailures := false
+	for _, report := range reports {
+		if report.NonCompliant > 0 {
+			hasFailures = true
+			break
+		}
+	}
 	if hasFailures && isPipeline(cmd) {
 		return fmt.Errorf("validation failures detected")
 	}
