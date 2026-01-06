@@ -806,7 +806,6 @@ func renderReport(reportMode, format string, reports []*bindingReport, resourceT
 	case "table":
 		printSummaryTables(reports, w, style)
 		printResourceTotals(resourceTotals, w, style)
-		printResourceNames(resourceDetails, w, style)
 		if reportMode == "all" {
 			printViolationLogs(reports, w, useColor)
 		}
@@ -886,6 +885,10 @@ func printResourceTotals(counts map[string]int, w io.Writer, style table.Style) 
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
 	t.SetTitle("Resources by Kind")
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Name: "Kind", WidthMin: 12},
+		{Name: "Total", WidthMin: 5},
+	})
 	t.AppendHeader(table.Row{"Kind", "Total"})
 	kinds := make([]string, 0, len(counts))
 	for kind := range counts {
