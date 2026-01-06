@@ -373,48 +373,6 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// func getRemoteMatchingResource(vap admissionregistrationv1.ValidatingAdmissionPolicy) []interface{} {
-// 	// MatchConstraints
-// 	// resourceRules
-// 	var res []interface{}
-// 	for _, resourceRule := range vap.Spec.MatchConstraints.ResourceRules {
-// 		apiGroups := resourceRule.APIGroups
-// 		apiVersions := resourceRule.APIVersions
-// 		resources := resourceRule.Resources
-
-// 		x, err := kubernetes.GetRemoteGeneric(apiGroups, apiVersions, resources)
-// 		if err != nil {
-// 			println("Error getting resources:", err)
-// 			continue
-// 		}
-// 		res = append(x, res...)
-
-// 	}
-// 	// excludeResourceRules not supported
-// 	if vap.Spec.MatchConstraints.ExcludeResourceRules != nil {
-// 		println("ExcludeResourceRules are currently not supported. Ignoring and matching all resources.")
-// 	}
-// 	// matchPolicy not supported
-// 	if *vap.Spec.MatchConstraints.MatchPolicy != admissionregistrationv1.Equivalent {
-// 		println("MatchPolicy is currently not supported. Ignoring and matching all resources.")
-// 	}
-// 	// namespaceSelector not supported
-// 	if vap.Spec.MatchConstraints.NamespaceSelector.MatchLabels != nil || vap.Spec.MatchConstraints.NamespaceSelector.MatchExpressions != nil {
-// 		println("NamespaceSelector is currently not supported. Ignoring and matching all resources.")
-// 	}
-// 	// objectSelector not supported
-// 	if vap.Spec.MatchConstraints.ObjectSelector.MatchLabels != nil || vap.Spec.MatchConstraints.ObjectSelector.MatchExpressions != nil {
-// 		println("ObjectSelector is currently not supported. Ignoring and matching all resources.")
-// 	}
-
-// 	// MatchCondition not supported
-// 	if vap.Spec.MatchConditions != nil {
-// 		println("MatchConditions are currently not supported. Ignoring and matching all resources.")
-// 	}
-
-// 	return res
-// }
-
 func loadLocalResources(path string) ([]map[string]interface{}, map[string]map[string]string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -517,17 +475,6 @@ func describeResource(obj map[string]interface{}) string {
 		namespace = "<cluster>"
 	}
 	return fmt.Sprintf("%s %s/%s", kind, namespace, name)
-}
-
-func describeResourceRef(obj map[string]interface{}) logging.ResourceRef {
-	kind, _ := obj["kind"].(string)
-	name := kubernetes.GetMetadataString(obj, "name")
-	namespace := kubernetes.GetMetadataString(obj, "namespace")
-	return logging.ResourceRef{
-		Kind:      kind,
-		Namespace: namespace,
-		Name:      name,
-	}
 }
 
 func evaluateValidations(policy *admissionregistrationv1.ValidatingAdmissionPolicy, binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding, resource map[string]interface{}, namespace string, namespaceLabels map[string]string) (validationResult, error) {
@@ -804,52 +751,6 @@ func extractPodsFromResources(resources []map[string]interface{}) ([]corev1.Pod,
 		pods = append(pods, pod)
 	}
 	return pods, nil
-}
-
-func fetchRemotePods(namespaces []string, all bool) ([]corev1.Pod, map[string]map[string]string, error) {
-	clientset, err := kubernetes.Init()
-	if err != nil {
-		return nil, nil, err
-	}
-	nsLabels := make(map[string]map[string]string)
-	var pods []corev1.Pod
-
-	if all {
-		podList, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return nil, nil, err
-		}
-		pods = append(pods, podList.Items...)
-
-		nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, ns := range nsList.Items {
-			nsLabels[ns.Name] = convertPSANamespaceLabels(ns.Labels)
-		}
-		return pods, nsLabels, nil
-	}
-
-	target := namespaces
-	if len(target) == 0 {
-		target = []string{kubernetes.ActiveNamespace()}
-	}
-	for _, ns := range target {
-		if ns == "" {
-			continue
-		}
-		podList, err := clientset.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return nil, nil, err
-		}
-		pods = append(pods, podList.Items...)
-		nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), ns, metav1.GetOptions{})
-		if err == nil {
-			nsLabels[ns] = convertPSANamespaceLabels(nsObj.Labels)
-		}
-	}
-	return pods, nsLabels, nil
 }
 
 func fetchNamespaceLabels(namespaces []string, all bool) (map[string]map[string]string, error) {
@@ -1314,10 +1215,6 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 				usesKolteq = true
 				continue
 			}
-			if _, ok := labels["pss.kolteq.com/"+mode]; ok {
-				kolteqModes[mode] = true
-				usesKolteq = true
-			}
 		}
 		res := &psaNamespaceResult{
 			Namespace: ns,
@@ -1600,18 +1497,6 @@ func namespaceLabelsUseKolteq(labels map[string]map[string]string) bool {
 			if strings.Contains(k, "pss.security.kolteq.com/") {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func hasKolteqMode(labels map[string]string, mode string) bool {
-	if labels == nil {
-		return false
-	}
-	for k := range labels {
-		if strings.HasSuffix(k, "/"+mode) && strings.Contains(k, "pss.security.kolteq.com/") {
-			return true
 		}
 	}
 	return false

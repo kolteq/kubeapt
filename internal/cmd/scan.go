@@ -138,17 +138,6 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 	return nil
 }
 
-func extractPSSLabels(labels map[string]string) []string {
-	result := make([]string, 0, 3)
-	for k, v := range labels {
-		if strings.HasPrefix(k, "pod-security.kubernetes.io/") && v != "" {
-			result = append(result, fmt.Sprintf("%s=%s", strings.TrimPrefix(k, "pod-security.kubernetes.io/"), v))
-		}
-	}
-	sort.Strings(result)
-	return result
-}
-
 func detectThirdPartyAdmissionControllers(clientset *kubeclient.Clientset) (kyverno bool, gatekeeper bool) {
 	deployments, err := clientset.AppsV1().Deployments("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
