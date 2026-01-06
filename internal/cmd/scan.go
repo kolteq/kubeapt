@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/cobra"
@@ -57,7 +58,17 @@ func runScan(cmd *cobra.Command, _ []string) error {
 }
 
 func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
-	nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	progressEnabled := true
+	var nsList *corev1.NamespaceList
+	err := withProgress("Fetching namespaces", 1, progressEnabled, func(tracker *progress.Tracker) error {
+		var listErr error
+		nsList, listErr = clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+		if listErr != nil {
+			return listErr
+		}
+		tracker.Increment(1)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -81,24 +92,65 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 	)
 
 	if ok {
-		vaps, bindings, err = loadPSAPolicies(policiesPath, bindingsPath)
+		policyFiles, err := collectManifestFilesRecursive(policiesPath)
+		if err != nil {
+			return err
+		}
+		bindingFiles := policyFiles
+		if bindingsPath != policiesPath {
+			bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
+			if err != nil {
+				return err
+			}
+		}
+		totalFiles := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
+		err = withProgress("Reading PSA policies", totalFiles, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = loadPoliciesFromFilesWithProgress(policyFiles, func() {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			bindings, err = loadBindingsFromFilesWithProgress(bindingFiles, func() {
+				tracker.Increment(1)
+			})
+			return err
+		})
 		if err != nil {
 			return err
 		}
 		if len(vaps) > 0 && len(bindings) > 0 {
-			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPolicies(vaps, kubernetes.ResourceScopeAllNamespaces, nil)
+			total := maxInt64(int64(len(vaps)), 1)
+			err = withProgress("Fetching policy resources", total, progressEnabled, func(tracker *progress.Tracker) error {
+				remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, kubernetes.ResourceScopeAllNamespaces, nil, func() {
+					tracker.Increment(1)
+				})
+				if err != nil {
+					return err
+				}
+				resources = append(resources, remoteRes...)
+				namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
+				return nil
+			})
 			if err != nil {
 				return err
 			}
-			resources = append(resources, remoteRes...)
-			namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
 		}
 
 		pods, err = extractPodsFromResources(resources)
 		if err != nil {
 			return err
 		}
-		compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, "")
+		totalWork := len(resources) * len(bindings)
+		if totalWork > 0 {
+			tracker, stop := startProgress("Evaluating PSA compliance", int64(totalWork), progressEnabled)
+			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, "", func() {
+				tracker.Increment(1)
+			})
+			stop()
+		} else {
+			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, "", nil)
+		}
 		if err != nil {
 			return err
 		}

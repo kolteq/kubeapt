@@ -144,6 +144,14 @@ func loadPSAPolicies(policiesPath, bindingsPath string) ([]admissionregistration
 }
 
 func loadPoliciesFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
+	return loadPoliciesFromFilesWithProgress(files, nil)
+}
+
+func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+	return loadBindingsFromFilesWithProgress(files, nil)
+}
+
+func loadPoliciesFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
 	var policies []admissionregistrationv1.ValidatingAdmissionPolicy
 	for _, file := range files {
 		items, err := kubernetes.GetLocalValidatingAdmissionPolicies(file)
@@ -151,11 +159,14 @@ func loadPoliciesFromFiles(files []string) ([]admissionregistrationv1.Validating
 			return nil, err
 		}
 		policies = append(policies, items...)
+		if onFile != nil {
+			onFile()
+		}
 	}
 	return policies, nil
 }
 
-func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+func loadBindingsFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	for _, file := range files {
 		items, err := kubernetes.GetLocalValidatingAdmissionPolicyBindings(file)
@@ -163,6 +174,9 @@ func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.Validating
 			return nil, err
 		}
 		bindings = append(bindings, items...)
+		if onFile != nil {
+			onFile()
+		}
 	}
 	return bindings, nil
 }

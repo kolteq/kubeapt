@@ -1068,6 +1068,7 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 		namespaces = []string{kubernetes.ActiveNamespace()}
 	}
 
+	progressEnabled := true
 	namespaceLabels := make(map[string]map[string]string)
 	var pods []corev1.Pod
 	var resources []map[string]interface{}
@@ -1103,7 +1104,30 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 	vaps := []admissionregistrationv1.ValidatingAdmissionPolicy{}
 	bindings := []admissionregistrationv1.ValidatingAdmissionPolicyBinding{}
 	if ok {
-		vaps, bindings, err = loadPSAPolicies(policiesPath, bindingsPath)
+		policyFiles, err := collectManifestFilesRecursive(policiesPath)
+		if err != nil {
+			return err
+		}
+		bindingFiles := policyFiles
+		if bindingsPath != policiesPath {
+			bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
+			if err != nil {
+				return err
+			}
+		}
+		totalFiles := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
+		err = withProgress("Reading PSA policies", totalFiles, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = loadPoliciesFromFilesWithProgress(policyFiles, func() {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			bindings, err = loadBindingsFromFilesWithProgress(bindingFiles, func() {
+				tracker.Increment(1)
+			})
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -1112,19 +1136,37 @@ func runValidatePSA(cmd *cobra.Command, _ []string) error {
 			if allNamespaces {
 				scope = kubernetes.ResourceScopeAllNamespaces
 			}
-			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPolicies(vaps, scope, namespaces)
+			total := maxInt64(int64(len(vaps)), 1)
+			err = withProgress("Fetching remote resources", total, progressEnabled, func(tracker *progress.Tracker) error {
+				remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, scope, namespaces, func() {
+					tracker.Increment(1)
+				})
+				if err != nil {
+					return err
+				}
+				resources = append(resources, remoteRes...)
+				namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
+				remotePods, err := extractPodsFromResources(remoteRes)
+				if err != nil {
+					return err
+				}
+				pods = append(pods, remotePods...)
+				return nil
+			})
 			if err != nil {
 				return err
 			}
-			resources = append(resources, remoteRes...)
-			namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
-			remotePods, err := extractPodsFromResources(remoteRes)
-			if err != nil {
-				return err
-			}
-			pods = append(pods, remotePods...)
 		}
-		compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, level)
+		totalWork := len(resources) * len(bindings)
+		if totalWork > 0 {
+			tracker, stop := startProgress("Evaluating PSA compliance", int64(totalWork), progressEnabled)
+			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, level, func() {
+				tracker.Increment(1)
+			})
+			stop()
+		} else {
+			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, level, nil)
+		}
 		if err != nil {
 			return err
 		}

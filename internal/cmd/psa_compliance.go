@@ -17,7 +17,7 @@ type psaComplianceCounts struct {
 	Violations   []violationDetail
 }
 
-func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreSelectors bool, level string) (map[string]psaComplianceCounts, error) {
+func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreSelectors bool, level string, onProgress func()) (map[string]psaComplianceCounts, error) {
 	results := make(map[string]psaComplianceCounts)
 	if len(policies) == 0 || len(bindings) == 0 || len(resources) == 0 {
 		return results, nil
@@ -42,6 +42,9 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 		}
 
 		for _, resource := range resources {
+			if onProgress != nil {
+				onProgress()
+			}
 			nsName := kubernetes.GetMetadataString(resource, "namespace")
 			if nsName == "" {
 				nsName = kubernetes.ActiveNamespace()
