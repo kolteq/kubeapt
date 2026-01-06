@@ -23,6 +23,7 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 		return results, nil
 	}
 
+	expandedLabels := expandPSANamespaceLabelIndex(namespaceLabels)
 	policyIndex := make(map[string]*admissionregistrationv1.ValidatingAdmissionPolicy)
 	for i := range policies {
 		policy := &policies[i]
@@ -48,7 +49,7 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 			if nsName == "" {
 				nsName = "default"
 			}
-			nsLabels, nsKnown := namespaceLabels[nsName]
+			nsLabels, nsKnown := expandedLabels[nsName]
 			if level != "" {
 				nsLabels = applyPSALevelLabels(nsLabels, level)
 				nsKnown = true
@@ -113,12 +114,47 @@ func applyPSALevelLabels(labels map[string]string, level string) map[string]stri
 	if level == "" {
 		return labels
 	}
-	out := make(map[string]string, len(labels)+3)
+	out := make(map[string]string, len(labels)+6)
 	for k, v := range labels {
 		out[k] = v
 	}
 	for _, mode := range []string{"warn", "audit", "enforce"} {
 		out["pss.security.kolteq.com/"+mode] = level
+		out["pod-security.kubernetes.io/"+mode] = level
 	}
 	return out
+}
+
+func expandPSANamespaceLabelIndex(labels map[string]map[string]string) map[string]map[string]string {
+	if labels == nil {
+		return nil
+	}
+	result := make(map[string]map[string]string, len(labels))
+	for ns, nsLabels := range labels {
+		result[ns] = expandPSANamespaceLabels(nsLabels)
+	}
+	return result
+}
+
+func expandPSANamespaceLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return labels
+	}
+	result := make(map[string]string, len(labels)+6)
+	for k, v := range labels {
+		result[k] = v
+	}
+	for _, mode := range []string{"warn", "audit", "enforce"} {
+		nativeKey := "pod-security.kubernetes.io/" + mode
+		kolteqKey := "pss.security.kolteq.com/" + mode
+		nativeVal, nativeOK := labels[nativeKey]
+		kolteqVal, kolteqOK := labels[kolteqKey]
+		if nativeOK && !kolteqOK {
+			result[kolteqKey] = nativeVal
+		}
+		if kolteqOK && !nativeOK {
+			result[nativeKey] = kolteqVal
+		}
+	}
+	return result
 }
