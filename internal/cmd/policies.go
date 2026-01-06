@@ -626,38 +626,6 @@ func locatePSAPolicies() (string, string, bool, error) {
 	return policiesPath, policiesPath, true, nil
 }
 
-func loadPSAPolicies(policiesPath, bindingsPath string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, []admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
-	policyFiles, err := collectManifestFilesRecursive(policiesPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	policies, err := loadPoliciesFromFiles(policyFiles)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	bindingFiles := policyFiles
-	if bindingsPath != policiesPath {
-		bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	bindings, err := loadBindingsFromFiles(bindingFiles)
-	if err != nil {
-		return nil, nil, err
-	}
-	return policies, bindings, nil
-}
-
-func loadPoliciesFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
-	return loadPoliciesFromFilesWithProgress(files, nil)
-}
-
-func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
-	return loadBindingsFromFilesWithProgress(files, nil)
-}
-
 func loadPoliciesFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
 	var policies []admissionregistrationv1.ValidatingAdmissionPolicy
 	for _, file := range files {
