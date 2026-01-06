@@ -29,7 +29,7 @@ func ActiveNamespace() string {
 	return activeNamespace
 }
 
-func Init() (*kubernetes.Clientset, error) {
+func Config() (*rest.Config, error) {
 	var config *rest.Config
 	var err error
 
@@ -39,20 +39,35 @@ func Init() (*kubernetes.Clientset, error) {
 			return nil, err
 		}
 		activeNamespace = detectNamespace(kubeconfigPath)
-	} else {
-		config, err = rest.InClusterConfig()
+		config.QPS = 50
+		config.Burst = 100
+		return config, nil
+	}
+
+	config, err = rest.InClusterConfig()
+	if err != nil {
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		kubeconfig := loadingRules.GetDefaultFilename()
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-			kubeconfig := loadingRules.GetDefaultFilename()
-			config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-			if err != nil {
-				return nil, err
-			}
-			kubeconfigPath = kubeconfig
-			activeNamespace = detectNamespace(kubeconfig)
-		} else {
-			activeNamespace = detectInClusterNamespace()
+			return nil, err
 		}
+		kubeconfigPath = kubeconfig
+		activeNamespace = detectNamespace(kubeconfig)
+		config.QPS = 50
+		config.Burst = 100
+		return config, nil
+	}
+	activeNamespace = detectInClusterNamespace()
+	config.QPS = 50
+	config.Burst = 100
+	return config, nil
+}
+
+func Init() (*kubernetes.Clientset, error) {
+	config, err := Config()
+	if err != nil {
+		return nil, err
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
