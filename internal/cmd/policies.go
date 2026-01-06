@@ -6,6 +6,7 @@ package cmd
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
@@ -26,6 +28,8 @@ const (
 	psaPoliciesDirName    = "pod-security-standards"
 	psaPoliciesSubdir     = "policies"
 	psaBindingsSubdir     = "bindings"
+	psaLabelPrefixNative  = "pod-security.kubernetes.io/"
+	psaLabelPrefixKolteq  = "pss.security.kolteq.com/"
 )
 
 func PoliciesCmd() *cobra.Command {
@@ -43,6 +47,9 @@ func newPoliciesPSACmd() *cobra.Command {
 		Short: "Pod Security Admission policies",
 	}
 	cmd.AddCommand(newPoliciesPSADownloadCmd())
+	cmd.AddCommand(newPoliciesPSALabelCmd("enforce"))
+	cmd.AddCommand(newPoliciesPSALabelCmd("audit"))
+	cmd.AddCommand(newPoliciesPSALabelCmd("warn"))
 	return cmd
 }
 
@@ -53,6 +60,149 @@ func newPoliciesPSADownloadCmd() *cobra.Command {
 		RunE:  runPoliciesPSADownload,
 	}
 	return cmd
+}
+
+func newPoliciesPSALabelCmd(mode string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   fmt.Sprintf("%s <level>", mode),
+		Short: fmt.Sprintf("Set the PSA %s level on a namespace", mode),
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPoliciesPSALabel(cmd, mode, args[0])
+		},
+	}
+	cmd.Flags().StringP("namespace", "n", "", "Namespace to label")
+	cmd.Flags().BoolP("all-namespaces", "A", false, "Apply the label to all namespaces")
+	cmd.Flags().Bool("kubernetes-native", false, "Use the Kubernetes native Pod Security label")
+	cmd.Flags().Bool("overwrite", false, "Overwrite an existing PSA label")
+	cmd.Flags().Bool("remove", false, "Remove the PSA label instead of setting it")
+	return cmd
+}
+
+func runPoliciesPSALabel(cmd *cobra.Command, mode, levelArg string) error {
+	level := strings.ToLower(strings.TrimSpace(levelArg))
+	if !isValidPSALevel(level) {
+		return fmt.Errorf("invalid level %s, expected baseline, restricted, or privileged", levelArg)
+	}
+	flags := cmd.Flags()
+	namespace, err := flags.GetString("namespace")
+	if err != nil {
+		return err
+	}
+	allNamespaces, err := flags.GetBool("all-namespaces")
+	if err != nil {
+		return err
+	}
+	if allNamespaces && namespace != "" {
+		return fmt.Errorf("--all-namespaces cannot be used together with --namespace")
+	}
+	if !allNamespaces && namespace == "" {
+		return fmt.Errorf("either --namespace or --all-namespaces must be specified")
+	}
+	useNative, err := flags.GetBool("kubernetes-native")
+	if err != nil {
+		return err
+	}
+	overwrite, err := flags.GetBool("overwrite")
+	if err != nil {
+		return err
+	}
+	remove, err := flags.GetBool("remove")
+	if err != nil {
+		return err
+	}
+
+	clientset, err := kubernetes.Init()
+	if err != nil {
+		return err
+	}
+
+	nativeKey := psaLabelPrefixNative + mode
+	kolteqKey := psaLabelPrefixKolteq + mode
+	targetKey := kolteqKey
+	if useNative {
+		targetKey = nativeKey
+	}
+
+	namespaces := []string{namespace}
+	if allNamespaces {
+		nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		namespaces = make([]string, 0, len(nsList.Items))
+		for _, ns := range nsList.Items {
+			namespaces = append(namespaces, ns.Name)
+		}
+	}
+
+	if !overwrite && !remove {
+		for _, nsName := range namespaces {
+			nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			labels := nsObj.Labels
+			if labels == nil {
+				continue
+			}
+			if _, has := labels[nativeKey]; has {
+				return fmt.Errorf("namespace %s already has a PSA %s label; use --overwrite to update it", nsName, mode)
+			}
+			if _, has := labels[kolteqKey]; has {
+				return fmt.Errorf("namespace %s already has a PSA %s label; use --overwrite to update it", nsName, mode)
+			}
+		}
+	}
+
+	for _, nsName := range namespaces {
+		nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		labels := nsObj.Labels
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+
+		if remove {
+			if _, ok := labels[targetKey]; !ok {
+				if !allNamespaces {
+					return fmt.Errorf("label %s is not set on namespace %s", targetKey, nsName)
+				}
+				continue
+			}
+			delete(labels, targetKey)
+			nsObj.Labels = labels
+			if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), nsObj, metav1.UpdateOptions{}); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s from namespace %s\n", targetKey, nsName)
+			continue
+		}
+
+		if overwrite {
+			delete(labels, nativeKey)
+			delete(labels, kolteqKey)
+		}
+		labels[targetKey] = level
+		nsObj.Labels = labels
+		if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), nsObj, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Set %s=%s on namespace %s\n", targetKey, level, nsName)
+	}
+
+	return nil
+}
+
+func isValidPSALevel(level string) bool {
+	switch level {
+	case "baseline", "restricted", "privileged":
+		return true
+	default:
+		return false
+	}
 }
 
 func runPoliciesPSADownload(cmd *cobra.Command, _ []string) error {
