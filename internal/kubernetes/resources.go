@@ -18,10 +18,6 @@ const (
 	ResourceScopeAllNamespaces ResourceScope = "all-namespaces"
 )
 
-func FetchResourcesForPolicies(policies []admissionregistrationv1.ValidatingAdmissionPolicy, scope ResourceScope, namespaces []string) ([]map[string]interface{}, map[string]map[string]string, error) {
-	return FetchResourcesForPoliciesWithProgress(policies, scope, namespaces, nil)
-}
-
 func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.ValidatingAdmissionPolicy, scope ResourceScope, namespaces []string, onPolicy func()) ([]map[string]interface{}, map[string]map[string]string, error) {
 	var all []map[string]interface{}
 	nsSet := map[string]struct{}{}

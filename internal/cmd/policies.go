@@ -5,7 +5,10 @@ package cmd
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,6 +20,17 @@ import (
 
 	"github.com/spf13/cobra"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/restmapper"
+	"gopkg.in/yaml.v3"
 
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
@@ -26,6 +40,8 @@ const (
 	psaPoliciesDirName    = "pod-security-standards"
 	psaPoliciesSubdir     = "policies"
 	psaBindingsSubdir     = "bindings"
+	psaLabelPrefixNative  = "pod-security.kubernetes.io/"
+	psaLabelPrefixKolteq  = "pss.security.kolteq.com/"
 )
 
 func PoliciesCmd() *cobra.Command {
@@ -43,16 +59,507 @@ func newPoliciesPSACmd() *cobra.Command {
 		Short: "Pod Security Admission policies",
 	}
 	cmd.AddCommand(newPoliciesPSADownloadCmd())
+	cmd.AddCommand(newPoliciesPSADeployCmd())
+	cmd.AddCommand(newPoliciesPSADeleteDeployCmd())
+	cmd.AddCommand(newPoliciesPSALabelCmd("enforce"))
+	cmd.AddCommand(newPoliciesPSALabelCmd("audit"))
+	cmd.AddCommand(newPoliciesPSALabelCmd("warn"))
 	return cmd
 }
 
 func newPoliciesPSADownloadCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "download",
-		Short: "Download the Pod Security Standards policies",
+		Short: "Download the KolTEQ Pod Security Standards policies",
 		RunE:  runPoliciesPSADownload,
 	}
 	return cmd
+}
+
+func newPoliciesPSADeployCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deploy",
+		Short: "Deploy PSA policies to the cluster",
+		RunE:  runPoliciesPSADeploy,
+	}
+	return cmd
+}
+
+func newPoliciesPSADeleteDeployCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete-deploy",
+		Short: "Remove PSA policies from the cluster",
+		RunE:  runPoliciesPSADeleteDeploy,
+	}
+	return cmd
+}
+
+func runPoliciesPSADeploy(cmd *cobra.Command, _ []string) error {
+	policiesPath, _, ok, err := locatePSAPolicies()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		root, err := psaPoliciesDir()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("PSA policy bundle not found in %s. Run `kubeapt policies psa download` to install", root)
+	}
+	resources, err := loadPSAKustomizeResources(policiesPath)
+	if err != nil {
+		return err
+	}
+	tracker, stop := startProgress("Deploying PSA policies", int64(len(resources)), true)
+	defer stop()
+	return applyKustomizeResources(resources, func() {
+		tracker.Increment(1)
+	})
+}
+
+func runPoliciesPSADeleteDeploy(cmd *cobra.Command, _ []string) error {
+	policiesPath, _, ok, err := locatePSAPolicies()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		root, err := psaPoliciesDir()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("PSA policy bundle not found in %s. Run `kubeapt policies psa download` to install", root)
+	}
+	resources, err := loadPSAKustomizeResources(policiesPath)
+	if err != nil {
+		return err
+	}
+	tracker, stop := startProgress("Deleting PSA policies", int64(len(resources)), true)
+	defer stop()
+	return deleteKustomizeResources(resources, func() {
+		tracker.Increment(1)
+	})
+}
+
+func newPoliciesPSALabelCmd(mode string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   fmt.Sprintf("%s <level>", mode),
+		Short: fmt.Sprintf("Set the PSA %s level on a namespace", mode),
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPoliciesPSALabel(cmd, mode, args[0])
+		},
+	}
+	cmd.Flags().StringP("namespace", "n", "", "Namespace to label")
+	cmd.Flags().BoolP("all-namespaces", "A", false, "Apply the label to all namespaces")
+	cmd.Flags().Bool("kubernetes-native", false, "Use the Kubernetes native Pod Security label")
+	cmd.Flags().Bool("overwrite", false, "Overwrite an existing PSA label")
+	cmd.Flags().Bool("remove", false, "Remove the PSA label instead of setting it")
+	return cmd
+}
+
+func runPoliciesPSALabel(cmd *cobra.Command, mode, levelArg string) error {
+	level := strings.ToLower(strings.TrimSpace(levelArg))
+	if !isValidPSALevel(level) {
+		return fmt.Errorf("invalid level %s, expected baseline, restricted, or privileged", levelArg)
+	}
+	flags := cmd.Flags()
+	namespace, err := flags.GetString("namespace")
+	if err != nil {
+		return err
+	}
+	allNamespaces, err := flags.GetBool("all-namespaces")
+	if err != nil {
+		return err
+	}
+	if allNamespaces && namespace != "" {
+		return fmt.Errorf("--all-namespaces cannot be used together with --namespace")
+	}
+	if !allNamespaces && namespace == "" {
+		return fmt.Errorf("either --namespace or --all-namespaces must be specified")
+	}
+	useNative, err := flags.GetBool("kubernetes-native")
+	if err != nil {
+		return err
+	}
+	overwrite, err := flags.GetBool("overwrite")
+	if err != nil {
+		return err
+	}
+	remove, err := flags.GetBool("remove")
+	if err != nil {
+		return err
+	}
+
+	clientset, err := kubernetes.Init()
+	if err != nil {
+		return err
+	}
+
+	nativeKey := psaLabelPrefixNative + mode
+	kolteqKey := psaLabelPrefixKolteq + mode
+	targetKey := kolteqKey
+	if useNative {
+		targetKey = nativeKey
+	}
+
+	namespaces := []string{namespace}
+	if allNamespaces {
+		nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		namespaces = make([]string, 0, len(nsList.Items))
+		for _, ns := range nsList.Items {
+			namespaces = append(namespaces, ns.Name)
+		}
+	}
+
+	if !overwrite && !remove {
+		for _, nsName := range namespaces {
+			nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			labels := nsObj.Labels
+			if labels == nil {
+				continue
+			}
+			if _, has := labels[nativeKey]; has {
+				return fmt.Errorf("namespace %s already has a PSA %s label; use --overwrite to update it", nsName, mode)
+			}
+			if _, has := labels[kolteqKey]; has {
+				return fmt.Errorf("namespace %s already has a PSA %s label; use --overwrite to update it", nsName, mode)
+			}
+		}
+	}
+
+	for _, nsName := range namespaces {
+		nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		labels := nsObj.Labels
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+
+		if remove {
+			if _, ok := labels[targetKey]; !ok {
+				if !allNamespaces {
+					return fmt.Errorf("label %s is not set on namespace %s", targetKey, nsName)
+				}
+				continue
+			}
+			delete(labels, targetKey)
+			nsObj.Labels = labels
+			if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), nsObj, metav1.UpdateOptions{}); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s from namespace %s\n", targetKey, nsName)
+			continue
+		}
+
+		if overwrite {
+			delete(labels, nativeKey)
+			delete(labels, kolteqKey)
+		}
+		labels[targetKey] = level
+		nsObj.Labels = labels
+		if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), nsObj, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Set %s=%s on namespace %s\n", targetKey, level, nsName)
+	}
+
+	return nil
+}
+
+type kustomizationSpec struct {
+	Resources []string `yaml:"resources"`
+	Bases     []string `yaml:"bases"`
+}
+
+func loadPSAKustomizeResources(root string) ([]*unstructured.Unstructured, error) {
+	manifestFiles, err := collectKustomizeManifestFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	if len(manifestFiles) == 0 {
+		return nil, fmt.Errorf("no resources found in %s", root)
+	}
+	return loadUnstructuredResources(manifestFiles)
+}
+
+func collectKustomizeManifestFiles(root string) ([]string, error) {
+	kustomizationPath, err := findKustomizationFile(root)
+	if err != nil {
+		return nil, err
+	}
+	if kustomizationPath == "" {
+		return collectManifestFilesRecursive(root)
+	}
+	spec, err := readKustomization(kustomizationPath)
+	if err != nil {
+		return nil, err
+	}
+	resources := append([]string{}, spec.Resources...)
+	resources = append(resources, spec.Bases...)
+	if len(resources) == 0 {
+		return nil, fmt.Errorf("kustomization in %s does not declare resources", root)
+	}
+	var files []string
+	baseDir := filepath.Dir(kustomizationPath)
+	for _, entry := range resources {
+		if entry == "" {
+			continue
+		}
+		path := entry
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, entry)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			nested, err := collectKustomizeManifestFiles(path)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, nested...)
+			continue
+		}
+		if isKustomizationFile(filepath.Base(path)) {
+			continue
+		}
+		files = append(files, path)
+	}
+	return files, nil
+}
+
+func findKustomizationFile(root string) (string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", err
+	}
+	dir := root
+	if !info.IsDir() {
+		dir = filepath.Dir(root)
+	}
+	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", nil
+}
+
+func isKustomizationFile(name string) bool {
+	switch strings.ToLower(name) {
+	case "kustomization", "kustomization.yaml", "kustomization.yml":
+		return true
+	default:
+		return false
+	}
+}
+
+func readKustomization(path string) (kustomizationSpec, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return kustomizationSpec{}, err
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return kustomizationSpec{}, err
+	}
+	allowed := map[string]struct{}{
+		"resources":  {},
+		"bases":      {},
+		"apiVersion": {},
+		"kind":       {},
+	}
+	for key := range raw {
+		if _, ok := allowed[key]; !ok {
+			return kustomizationSpec{}, fmt.Errorf("kustomization field %q is not supported", key)
+		}
+	}
+	var spec kustomizationSpec
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		return kustomizationSpec{}, err
+	}
+	return spec, nil
+}
+
+func loadUnstructuredResources(files []string) ([]*unstructured.Unstructured, error) {
+	var resources []*unstructured.Unstructured
+	for _, path := range files {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		decoder := utilyaml.NewYAMLOrJSONDecoder(file, 4096)
+		for {
+			var raw runtime.RawExtension
+			if err := decoder.Decode(&raw); err != nil {
+				if err == io.EOF {
+					break
+				}
+				file.Close()
+				return nil, err
+			}
+			if len(bytes.TrimSpace(raw.Raw)) == 0 {
+				continue
+			}
+			var obj map[string]interface{}
+			if err := json.Unmarshal(raw.Raw, &obj); err != nil {
+				file.Close()
+				return nil, err
+			}
+			if len(obj) == 0 {
+				continue
+			}
+			resources = append(resources, &unstructured.Unstructured{Object: obj})
+		}
+		file.Close()
+	}
+	return resources, nil
+}
+
+func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress func()) error {
+	config, err := kubernetes.Config()
+	if err != nil {
+		return err
+	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return err
+	}
+	groupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
+	if err != nil {
+		return err
+	}
+	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
+
+	for _, resource := range resources {
+		gvk := resource.GroupVersionKind()
+		if gvk.Empty() {
+			return fmt.Errorf("resource is missing apiVersion or kind")
+		}
+		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return err
+		}
+		name := resource.GetName()
+		if name == "" {
+			return fmt.Errorf("resource %s missing metadata.name", gvk.String())
+		}
+		var client dynamic.ResourceInterface
+		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+			ns := resource.GetNamespace()
+			if ns == "" {
+				ns = kubernetes.ActiveNamespace()
+				if ns == "" {
+					ns = "default"
+				}
+				resource.SetNamespace(ns)
+			}
+			client = dynamicClient.Resource(mapping.Resource).Namespace(ns)
+		} else {
+			client = dynamicClient.Resource(mapping.Resource)
+		}
+		payload, err := json.Marshal(resource.Object)
+		if err != nil {
+			return err
+		}
+		_, err = client.Patch(context.TODO(), name, types.ApplyPatchType, payload, metav1.PatchOptions{
+			FieldManager: "kubeapt",
+		})
+		if err != nil {
+			return err
+		}
+		if onProgress != nil {
+			onProgress()
+		}
+	}
+	return nil
+}
+
+func deleteKustomizeResources(resources []*unstructured.Unstructured, onProgress func()) error {
+	config, err := kubernetes.Config()
+	if err != nil {
+		return err
+	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return err
+	}
+	groupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
+	if err != nil {
+		return err
+	}
+	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
+
+	for i := len(resources) - 1; i >= 0; i-- {
+		resource := resources[i]
+		gvk := resource.GroupVersionKind()
+		if gvk.Empty() {
+			return fmt.Errorf("resource is missing apiVersion or kind")
+		}
+		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return err
+		}
+		name := resource.GetName()
+		if name == "" {
+			return fmt.Errorf("resource %s missing metadata.name", gvk.String())
+		}
+		var client dynamic.ResourceInterface
+		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+			ns := resource.GetNamespace()
+			if ns == "" {
+				ns = kubernetes.ActiveNamespace()
+				if ns == "" {
+					ns = "default"
+				}
+				resource.SetNamespace(ns)
+			}
+			client = dynamicClient.Resource(mapping.Resource).Namespace(ns)
+		} else {
+			client = dynamicClient.Resource(mapping.Resource)
+		}
+		err = client.Delete(context.TODO(), name, metav1.DeleteOptions{})
+		if apierrors.IsNotFound(err) {
+			if onProgress != nil {
+				onProgress()
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if onProgress != nil {
+			onProgress()
+		}
+	}
+	return nil
+}
+
+func isValidPSALevel(level string) bool {
+	switch level {
+	case "baseline", "restricted", "privileged":
+		return true
+	default:
+		return false
+	}
 }
 
 func runPoliciesPSADownload(cmd *cobra.Command, _ []string) error {
@@ -119,31 +626,7 @@ func locatePSAPolicies() (string, string, bool, error) {
 	return policiesPath, policiesPath, true, nil
 }
 
-func loadPSAPolicies(policiesPath, bindingsPath string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, []admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
-	policyFiles, err := collectManifestFilesRecursive(policiesPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	policies, err := loadPoliciesFromFiles(policyFiles)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	bindingFiles := policyFiles
-	if bindingsPath != policiesPath {
-		bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	bindings, err := loadBindingsFromFiles(bindingFiles)
-	if err != nil {
-		return nil, nil, err
-	}
-	return policies, bindings, nil
-}
-
-func loadPoliciesFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
+func loadPoliciesFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
 	var policies []admissionregistrationv1.ValidatingAdmissionPolicy
 	for _, file := range files {
 		items, err := kubernetes.GetLocalValidatingAdmissionPolicies(file)
@@ -151,11 +634,14 @@ func loadPoliciesFromFiles(files []string) ([]admissionregistrationv1.Validating
 			return nil, err
 		}
 		policies = append(policies, items...)
+		if onFile != nil {
+			onFile()
+		}
 	}
 	return policies, nil
 }
 
-func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+func loadBindingsFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	for _, file := range files {
 		items, err := kubernetes.GetLocalValidatingAdmissionPolicyBindings(file)
@@ -163,6 +649,9 @@ func loadBindingsFromFiles(files []string) ([]admissionregistrationv1.Validating
 			return nil, err
 		}
 		bindings = append(bindings, items...)
+		if onFile != nil {
+			onFile()
+		}
 	}
 	return bindings, nil
 }
