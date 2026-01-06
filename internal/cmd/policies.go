@@ -56,7 +56,7 @@ func newPoliciesPSACmd() *cobra.Command {
 func newPoliciesPSADownloadCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "download",
-		Short: "Download the Pod Security Standards policies",
+		Short: "Download the KolTEQ Pod Security Standards policies",
 		RunE:  runPoliciesPSADownload,
 	}
 	return cmd
