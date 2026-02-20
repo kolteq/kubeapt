@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -29,6 +30,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/kolteq/kubeapt/internal/cel"
+	"github.com/kolteq/kubeapt/internal/config"
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 	"github.com/kolteq/kubeapt/internal/logging"
 )
@@ -54,6 +56,21 @@ type bindingReport struct {
 	Violations   []violationDetail `json:"violations,omitempty"`
 }
 
+type namespaceReport struct {
+	Namespace    string            `json:"namespace"`
+	Total        int               `json:"total"`
+	Compliant    int               `json:"compliant"`
+	NonCompliant int               `json:"nonCompliant"`
+	Violations   []violationDetail `json:"violations,omitempty"`
+}
+
+type resourceReport struct {
+	Kind            string            `json:"kind"`
+	Resource        string            `json:"resource"`
+	TotalViolations int               `json:"totalViolations"`
+	Violations      []violationDetail `json:"violations,omitempty"`
+}
+
 type violationRecord struct {
 	Message string
 	Path    string
@@ -69,54 +86,48 @@ func ValidateCmd(logLevelGetter func() string) *cobra.Command {
 	getLogLevel = logLevelGetter
 	cmd := &cobra.Command{
 		Use:   "validate",
-		Short: "Validation utilities",
+		Short: "Validate admission policies against resources",
+		RunE:  runValidateVAP,
 	}
 	cmd.PersistentFlags().Bool("pipeline", false, "Indicate the command runs inside CI/CD")
 	cmd.PersistentFlags().BoolP("all-namespaces", "A", false, "Use all namespaces instead of the active one")
 	cmd.PersistentFlags().StringP("namespaces", "n", "", "Comma separated list of namespaces to evaluate")
+	cmd.PersistentFlags().String("namespace-selector", "", "Label selector to choose namespaces (e.g. env=prod)")
 	cmd.PersistentFlags().StringP("format", "f", "table", "Specify the report output format: table or json")
 	cmd.PersistentFlags().String("report", "summary", "Specify the final report type: summary or all")
 	cmd.PersistentFlags().String("output", "", "Write the report to a file path instead of stdout")
-	cmd.AddCommand(newValidateVAPCmd())
-	cmd.AddCommand(newValidatePSACmd())
-	return cmd
-}
-
-func newValidateVAPCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:    "vap",
-		Short:  "Validate ValidatingAdmissionPolicies and PodSecurityAdmission labels against resources",
-		PreRun: vapPreRun,
-		RunE:   runValidateVAP,
-	}
-
+	cmd.Flags().String("bundle", "", "Policy bundle name to use for policies/bindings")
+	cmd.Flags().String("bundle-version", "", "Bundle version to use with --bundle (defaults to latest)")
 	cmd.Flags().StringP("policies", "p", "", "Specify the file or folder to the ValidatingAdmissionPolicy YAML file")
+	cmd.Flags().StringP("policy-name", "P", "", "Policy name to use from downloaded policies")
 	cmd.Flags().StringP("bindings", "b", "", "Specify the file or folder to the ValidatingAdmissionPolicyBinding YAML file")
-	cmd.Flags().StringP("resources", "r", "", "Specify the file or folder to the resource YAML file to validate")
+	cmd.Flags().StringP("resource", "r", "", "Specify the file or folder to the resource YAML file to validate")
+	cmd.Flags().String("psa-level", "", "PSA level to evaluate when using the pod-security-admission bundle: baseline or restricted")
 	cmd.Flags().String("log-file", "", "Optional file to capture WARN/AUDIT output")
-	cmd.Flags().Bool("remote-resources", false, "Fetch resources from the Kubernetes API instead of local files")
-	cmd.Flags().Bool("ignore-selectors", false, "Ignore binding selectors and match policies on all selected resources")
-	cmd.Flags().Bool("remote-policies", false, "Specify if policies from the Kubernetes API should be used for validation")
-
+	cmd.Flags().Bool("ignore-bindings", false, "Ignore binding match rules and match policies on all selected resources")
+	cmd.Flags().String("view", "", "Report view: policy, namespace, or resource")
 	return cmd
-}
-
-func vapPreRun(cmd *cobra.Command, _ []string) {
-	if !cmd.Flag("remote-policies").Changed {
-		cmd.MarkFlagRequired("policies")
-	}
-	if !cmd.Flag("remote-resources").Changed {
-		cmd.MarkFlagRequired("resources")
-	}
 }
 
 func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	flags := cmd.Flags()
+	bundleName, err := flags.GetString("bundle")
+	if err != nil {
+		return err
+	}
+	bundleVersion, err := flags.GetString("bundle-version")
+	if err != nil {
+		return err
+	}
 	policyFile, err := flags.GetString("policies")
 	if err != nil {
 		return err
 	}
-	ignoreSelectors, err := flags.GetBool("ignore-selectors")
+	policyName, err := flags.GetString("policy-name")
+	if err != nil {
+		return err
+	}
+	ignoreBindings, err := flags.GetBool("ignore-bindings")
 	if err != nil {
 		return err
 	}
@@ -124,15 +135,15 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	resourceFile, err := flags.GetString("resources")
+	resourceFile, err := flags.GetString("resource")
 	if err != nil {
 		return err
 	}
-	remotePolicies, err := flags.GetBool("remote-policies")
+	psaLevelRaw, err := flags.GetString("psa-level")
 	if err != nil {
 		return err
 	}
-	remoteResources, err := flags.GetBool("remote-resources")
+	viewRaw, err := flags.GetString("view")
 	if err != nil {
 		return err
 	}
@@ -141,6 +152,10 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	namespaceList, err := flags.GetString("namespaces")
+	if err != nil {
+		return err
+	}
+	namespaceSelector, err := flags.GetString("namespace-selector")
 	if err != nil {
 		return err
 	}
@@ -160,8 +175,66 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid output format %s, expected table or json", format)
 	}
 
+	if bundleName != "" && (policyFile != "" || bindingFile != "" || policyName != "") {
+		return fmt.Errorf("--bundle cannot be combined with --policies, --policy-name, or --bindings")
+	}
+	if bundleVersion != "" && bundleName == "" {
+		return fmt.Errorf("--bundle-version requires --bundle")
+	}
+	if policyName != "" && policyFile != "" {
+		return fmt.Errorf("--policy-name cannot be combined with --policies")
+	}
+	if policyName != "" && bindingFile != "" {
+		return fmt.Errorf("--policy-name cannot be combined with --bindings")
+	}
+
+	if !ignoreBindings && bindingFile == "" && (policyFile != "" || policyName != "") {
+		ignoreBindings = true
+		fmt.Fprintln(cmd.ErrOrStderr(), "No bindings provided, enabling --ignore-bindings")
+	}
+
+	psaLevel := strings.ToLower(strings.TrimSpace(psaLevelRaw))
+	if psaLevel != "" && psaLevel != "baseline" && psaLevel != "restricted" {
+		return fmt.Errorf("invalid psa level %s, expected baseline or restricted", psaLevel)
+	}
+	if bundleName == "pod-security-admission" {
+		if psaLevel == "" {
+			return fmt.Errorf("--psa-level is required when using bundle pod-security-admission")
+		}
+	} else if psaLevel != "" {
+		return fmt.Errorf("--psa-level is only supported with --bundle pod-security-admission")
+	}
+
+	view := strings.ToLower(strings.TrimSpace(viewRaw))
+	if view == "" {
+		if bundleName != "" {
+			view = "namespace"
+		} else {
+			view = "policy"
+		}
+	}
+	if view != "policy" && view != "namespace" && view != "resource" {
+		return fmt.Errorf("invalid view %s, expected policy, namespace, or resource", view)
+	}
+	viewHasPolicy := view == "policy"
+	viewHasNamespace := view == "namespace"
+	viewHasResource := view == "resource"
+
 	if allNamespaces && len(namespaces) > 0 {
 		return fmt.Errorf("--all-namespaces cannot be used together with --namespaces")
+	}
+	if namespaceSelector != "" {
+		if allNamespaces || len(namespaces) > 0 {
+			return fmt.Errorf("--namespace-selector cannot be used together with --all-namespaces or --namespaces")
+		}
+		selected, err := namespacesFromSelector(namespaceSelector)
+		if err != nil {
+			return err
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("no namespaces matched selector %s", namespaceSelector)
+		}
+		namespaces = selected
 	}
 	if len(namespaces) == 0 && !allNamespaces {
 		namespaces = []string{kubernetes.ActiveNamespace()}
@@ -187,28 +260,112 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		useColor = false
 	}
 
+	startTime := time.Now()
+
 	var vaps []admissionregistrationv1.ValidatingAdmissionPolicy
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 
-	if remotePolicies {
-		err = withProgress("Fetching remote policies", 2, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
+	switch {
+	case bundleName != "":
+		if err := validateBundleSegment("bundle name", bundleName); err != nil {
+			return err
+		}
+		version := strings.TrimSpace(bundleVersion)
+		if version != "" {
+			if err := validateBundleSegment("bundle version", version); err != nil {
+				return err
+			}
+		} else {
+			bundles, err := fetchBundleIndex(cmd.Context(), bundleIndexURL)
 			if err != nil {
 				return err
 			}
-			tracker.Increment(1)
-
-			bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+			version, err = resolveBundleVersionFromIndex(bundles, bundleName, "")
 			if err != nil {
 				return err
 			}
-			tracker.Increment(1)
-			return nil
+		}
+		ok, err := bundleVersionExists(bundleName, version)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if bundleVersion == "" {
+				return fmt.Errorf("latest version %s for bundle %s is not downloaded; run `kubeapt bundles download %s`", version, bundleName, bundleName)
+			}
+			return fmt.Errorf("bundle %s version %s is not downloaded; run `kubeapt bundles download %s --version %s`", bundleName, version, bundleName, version)
+		}
+		policiesPath, bindingsPath, ok, err := config.LocateBundleFiles(bundleName, version)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			root, err := config.BundleVersionDir(bundleName, version)
+			if err != nil {
+				return err
+			}
+			downloadCmd := fmt.Sprintf("kubeapt bundles download %s --version %s", bundleName, version)
+			if bundleVersion == "" {
+				downloadCmd = fmt.Sprintf("kubeapt bundles download %s", bundleName)
+			}
+			return fmt.Errorf("policy bundle %s %s not found in %s. Run `%s` to install", bundleName, version, root, downloadCmd)
+		}
+		policyFiles, err := config.CollectManifestFilesRecursive(policiesPath)
+		if err != nil {
+			return err
+		}
+		bindingFiles, err := config.CollectManifestFilesRecursive(bindingsPath)
+		if err != nil {
+			return err
+		}
+		total := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
+		err = withProgress("Reading policies", total, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = config.LoadPoliciesFromFilesWithProgress(policyFiles, func() {
+				tracker.Increment(1)
+			})
+			if err != nil {
+				return err
+			}
+			bindings, err = config.LoadBindingsFromFilesWithProgress(bindingFiles, func() {
+				tracker.Increment(1)
+			})
+			return err
 		})
 		if err != nil {
 			return err
 		}
-	} else {
+	case policyName != "":
+		resolved, err := ensurePolicyVersionAvailable(cmd, "")
+		if err != nil {
+			return err
+		}
+		index, err := loadPoliciesIndex(cmd.Context())
+		if err != nil {
+			return err
+		}
+		policyPath, err := resolvePolicyFileWithIndex(index, policyName, resolved)
+		if err != nil {
+			return err
+		}
+		policyFiles, err := kubernetes.CountManifestFiles(policyPath)
+		if err != nil {
+			return err
+		}
+		total := maxInt64(int64(policyFiles), 1)
+		err = withProgress("Reading policies", total, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = kubernetes.GetLocalValidatingAdmissionPoliciesWithProgress(policyPath, func(string) {
+				tracker.Increment(1)
+			})
+			return err
+		})
+		if err != nil {
+			return err
+		}
+	case policyFile != "" || bindingFile != "":
+		if policyFile == "" && bindingFile != "" {
+			policyFile = bindingFile
+			logging.Debugf("No policies path provided, reusing %s", bindingFile)
+		}
 		if bindingFile == "" {
 			bindingFile = policyFile
 			logging.Debugf("No bindings path provided, reusing %s", policyFile)
@@ -237,6 +394,28 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return err
 		}
+	default:
+		err = withProgress("Fetching remote policies", 2, progressEnabled, func(tracker *progress.Tracker) error {
+			vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
+			if err != nil {
+				return err
+			}
+			tracker.Increment(1)
+
+			bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+			if err != nil {
+				return err
+			}
+			tracker.Increment(1)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if ignoreBindings && len(bindings) == 0 {
+		bindings = implicitBindingsForPolicies(vaps)
 	}
 
 	var resources []map[string]interface{}
@@ -251,9 +430,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		logging.Debugf("Loaded %d resources from %s", len(localRes), resourceFile)
 		resources = append(resources, localRes...)
 		namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, localNS, namespaces, allNamespaces)
-	}
-
-	if remoteResources {
+	} else {
 		scope := kubernetes.ResourceScopeSelected
 		if allNamespaces {
 			scope = kubernetes.ResourceScopeAllNamespaces
@@ -280,21 +457,126 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("no resources available for validation")
 	}
 
-	resourceTotals := countResourcesByKind(resources)
-	resourceDetails := collectResourceDetails(resources)
+	normalizeResourcesForCEL(resources)
 
+	collectNamespace := viewHasNamespace
+	collectResource := viewHasResource
+	needPolicyEval := viewHasPolicy || collectNamespace || collectResource
+
+	var (
+		policyReports   []*bindingReport
+		namespaceReport []namespaceReport
+		resourceReport  []resourceReport
+		policyFailures  bool
+		resourceTotals  map[string]int
+		resourceDetails []resourceDetail
+	)
+
+	if needPolicyEval {
+		resourceTotals = countResourcesByKind(resources)
+		resourceDetails = collectResourceDetails(resources)
+		psaLevelForEval := ""
+		if bundleName == "pod-security-admission" {
+			psaLevelForEval = psaLevel
+		}
+		reports, nsReports, resReports, failures, err := evaluatePolicyReports(vaps, bindings, resources, namespaceLabels, ignoreBindings, collectNamespace, collectResource, psaLevelForEval, progressEnabled)
+		if err != nil {
+			return err
+		}
+		policyReports = reports
+		namespaceReport = nsReports
+		resourceReport = resReports
+		policyFailures = failures
+	}
+
+	if viewHasPolicy {
+		if format == "json" {
+			stopTime := time.Now()
+			metadata := buildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
+			payload := buildPolicyJSONReport(reportMode, policyReports, resourceTotals, resourceDetails)
+			if err := writeJSONEnvelope(writer, metadata, payload); err != nil {
+				return err
+			}
+		} else {
+			if err := renderReport(reportMode, format, policyReports, resourceTotals, resourceDetails, writer, tableStyle, useColor); err != nil {
+				return err
+			}
+		}
+	}
+	if viewHasNamespace {
+		if format == "json" {
+			stopTime := time.Now()
+			metadata := buildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
+			payload := buildNamespaceJSONReport(reportMode, namespaceReport, resourceTotals)
+			if err := writeJSONEnvelope(writer, metadata, payload); err != nil {
+				return err
+			}
+		} else {
+			if err := renderNamespaceReport(reportMode, format, namespaceReport, resourceTotals, writer, tableStyle, useColor); err != nil {
+				return err
+			}
+		}
+	}
+	if viewHasResource {
+		if format == "json" {
+			stopTime := time.Now()
+			metadata := buildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
+			payload := buildResourceJSONReport(reportMode, resourceReport)
+			if err := writeJSONEnvelope(writer, metadata, payload); err != nil {
+				return err
+			}
+		} else {
+			if err := renderResourceReport(reportMode, format, resourceReport, writer, tableStyle, useColor); err != nil {
+				return err
+			}
+		}
+	}
+
+	if isPipeline(cmd) {
+		if (viewHasPolicy || viewHasResource) && policyFailures {
+			return fmt.Errorf("validation failures detected")
+		}
+		if viewHasNamespace {
+			for _, ns := range namespaceReport {
+				if ns.NonCompliant > 0 {
+					return fmt.Errorf("validation failures detected")
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreBindings bool, collectNamespace bool, collectResource bool, psaLevel string, progressEnabled bool) ([]*bindingReport, []namespaceReport, []resourceReport, bool, error) {
 	if len(bindings) == 0 {
 		logging.Debugf("No ValidatingAdmissionPolicyBindings available to evaluate")
-		return nil
+		return nil, nil, nil, false, nil
 	}
 
 	policyIndex := make(map[string]*admissionregistrationv1.ValidatingAdmissionPolicy)
-	for i := range vaps {
-		policy := &vaps[i]
+	for i := range policies {
+		policy := &policies[i]
 		policyIndex[policy.Name] = policy
 	}
 
 	var reports []*bindingReport
+	storeResourceDetails := collectNamespace || collectResource
+	var (
+		resourceStatus     map[string]bool
+		resourceNamespace  map[string]string
+		resourceViolations map[string][]violationDetail
+		resourceDisplay    map[string]string
+		resourceKind       map[string]string
+		resMu              sync.Mutex
+	)
+	if storeResourceDetails {
+		resourceStatus = make(map[string]bool)
+		resourceNamespace = make(map[string]string)
+		resourceViolations = make(map[string][]violationDetail)
+		resourceDisplay = make(map[string]string)
+		resourceKind = make(map[string]string)
+	}
 
 	totalWork := len(resources) * len(bindings)
 	tracker, stop := startProgress("Validating resources", int64(totalWork), progressEnabled)
@@ -316,7 +598,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		binding := &bindings[i]
 		policy, ok := policyIndex[binding.Spec.PolicyName]
 		if !ok {
-			return fmt.Errorf("binding %s references missing policy %s", binding.Name, binding.Spec.PolicyName)
+			return nil, nil, nil, false, fmt.Errorf("binding %s references missing policy %s", binding.Name, binding.Spec.PolicyName)
 		}
 
 		bReport := &bindingReport{
@@ -349,13 +631,20 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 						progressCh <- struct{}{}
 						nsName := kubernetes.GetMetadataString(resource, "namespace")
 						nsLabels, nsKnown := namespaceLabels[nsName]
+						if psaLevel != "" {
+							nsLabels = applyPSALevelLabels(nsLabels, psaLevel)
+							nsKnown = true
+						}
 						if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
 							continue
 						}
-						if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, ignoreSelectors, ignoreSelectors) {
-							continue
+						if !ignoreBindings {
+							if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, false, false) {
+								continue
+							}
 						}
 						resName := describeResource(resource)
+						resKind, resDisplay := resourceDisplayName(resource)
 						logging.Debugf("  Matched %s", resName)
 						result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
 						if err != nil {
@@ -366,12 +655,16 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 							cancel()
 							return
 						}
+						resID := resourceIdentifier(resource)
 						if result.Compliant {
 							mu.Lock()
 							matched = true
 							bReport.Total++
 							bReport.Compliant++
 							mu.Unlock()
+							if storeResourceDetails {
+								updateResourceStatus(resourceStatus, resourceNamespace, resourceViolations, resourceDisplay, resourceKind, resID, resDisplay, resKind, nsName, true, nil, &resMu)
+							}
 							continue
 						}
 						violations := make([]violationDetail, len(result.Violations))
@@ -391,6 +684,9 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 						bReport.NonCompliant++
 						bReport.Violations = append(bReport.Violations, violations...)
 						mu.Unlock()
+						if storeResourceDetails {
+							updateResourceStatus(resourceStatus, resourceNamespace, resourceViolations, resourceDisplay, resourceKind, resID, resDisplay, resKind, nsName, false, violations, &resMu)
+						}
 					}
 				}
 			}()
@@ -409,7 +705,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		cancel()
 		select {
 		case err := <-errCh:
-			return err
+			return nil, nil, nil, false, err
 		default:
 		}
 
@@ -421,8 +717,79 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if err := renderReport(reportMode, format, reports, resourceTotals, resourceDetails, writer, tableStyle, useColor); err != nil {
-		return err
+	var (
+		namespaceReports []namespaceReport
+		resourceReports  []resourceReport
+	)
+	if collectNamespace {
+		namespaceMap := make(map[string]*namespaceReport)
+		for id, status := range resourceStatus {
+			ns := resourceNamespace[id]
+			if ns == "" {
+				ns = "<cluster>"
+			}
+			report, ok := namespaceMap[ns]
+			if !ok {
+				report = &namespaceReport{Namespace: ns}
+				namespaceMap[ns] = report
+			}
+			report.Total++
+			if status {
+				report.Compliant++
+			} else {
+				report.NonCompliant++
+				if violations := resourceViolations[id]; len(violations) > 0 {
+					report.Violations = append(report.Violations, violations...)
+				}
+			}
+		}
+		for _, res := range resources {
+			ns := kubernetes.GetMetadataString(res, "namespace")
+			if ns == "" {
+				continue
+			}
+			if _, ok := namespaceMap[ns]; !ok {
+				namespaceMap[ns] = &namespaceReport{Namespace: ns}
+			}
+		}
+		for ns := range namespaceLabels {
+			if ns == "" {
+				continue
+			}
+			if _, ok := namespaceMap[ns]; !ok {
+				namespaceMap[ns] = &namespaceReport{Namespace: ns}
+			}
+		}
+		for _, report := range namespaceMap {
+			namespaceReports = append(namespaceReports, *report)
+		}
+		sort.Slice(namespaceReports, func(i, j int) bool {
+			return namespaceReports[i].Namespace < namespaceReports[j].Namespace
+		})
+	}
+	if collectResource {
+		for id, violations := range resourceViolations {
+			if len(violations) == 0 {
+				continue
+			}
+			name := resourceDisplay[id]
+			if name == "" {
+				name = id
+			}
+			kind := resourceKind[id]
+			resourceReports = append(resourceReports, resourceReport{
+				Kind:            kind,
+				Resource:        name,
+				TotalViolations: len(violations),
+				Violations:      violations,
+			})
+		}
+		sort.Slice(resourceReports, func(i, j int) bool {
+			if resourceReports[i].Kind == resourceReports[j].Kind {
+				return resourceReports[i].Resource < resourceReports[j].Resource
+			}
+			return resourceReports[i].Kind < resourceReports[j].Kind
+		})
 	}
 
 	hasFailures := false
@@ -432,11 +799,58 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 			break
 		}
 	}
-	if hasFailures && isPipeline(cmd) {
-		return fmt.Errorf("validation failures detected")
-	}
 
-	return nil
+	return reports, namespaceReports, resourceReports, hasFailures, nil
+}
+
+func updateResourceStatus(status map[string]bool, namespaces map[string]string, violations map[string][]violationDetail, display map[string]string, kinds map[string]string, id, resourceName, kind, namespace string, compliant bool, newViolations []violationDetail, mu *sync.Mutex) {
+	if status == nil {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if id == "" {
+		return
+	}
+	if resourceName != "" {
+		display[id] = resourceName
+	}
+	if kind != "" {
+		kinds[id] = kind
+	}
+	namespaces[id] = namespace
+	if compliant {
+		if _, ok := status[id]; !ok {
+			status[id] = true
+		}
+		return
+	}
+	status[id] = false
+	if len(newViolations) > 0 {
+		violations[id] = append(violations[id], newViolations...)
+	}
+}
+
+func implicitBindingsForPolicies(policies []admissionregistrationv1.ValidatingAdmissionPolicy) []admissionregistrationv1.ValidatingAdmissionPolicyBinding {
+	if len(policies) == 0 {
+		return nil
+	}
+	bindings := make([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, 0, len(policies))
+	for _, policy := range policies {
+		name := strings.TrimSpace(policy.Name)
+		if name == "" {
+			continue
+		}
+		bindings = append(bindings, admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name + "--implicit",
+			},
+			Spec: admissionregistrationv1.ValidatingAdmissionPolicyBindingSpec{
+				PolicyName: name,
+			},
+		})
+	}
+	return bindings
 }
 
 func loadLocalResources(path string) ([]map[string]interface{}, map[string]map[string]string, error) {
@@ -533,6 +947,67 @@ func buildNamespaceLabelIndex(resources []map[string]interface{}) map[string]map
 	return index
 }
 
+func normalizeResourcesForCEL(resources []map[string]interface{}) {
+	for _, obj := range resources {
+		normalizeResourceForCEL(obj)
+	}
+}
+
+func normalizeResourceForCEL(obj map[string]interface{}) {
+	if obj == nil {
+		return
+	}
+	kind, _ := obj["kind"].(string)
+	switch strings.ToLower(kind) {
+	case "role", "clusterrole":
+		normalizeRBACRules(obj)
+	}
+}
+
+func normalizeRBACRules(obj map[string]interface{}) {
+	rulesRaw, ok := obj["rules"]
+	if !ok {
+		return
+	}
+	if rulesRaw == nil {
+		obj["rules"] = []interface{}{}
+		return
+	}
+	rules, ok := rulesRaw.([]interface{})
+	if !ok {
+		return
+	}
+	for _, ruleRaw := range rules {
+		rule, ok := ruleRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		normalizeListField(rule, "apiGroups")
+		normalizeListField(rule, "resources")
+		normalizeListField(rule, "verbs")
+		normalizeListField(rule, "resourceNames")
+		normalizeListField(rule, "nonResourceURLs")
+	}
+}
+
+func normalizeListField(rule map[string]interface{}, key string) {
+	val, ok := rule[key]
+	if !ok || val == nil {
+		rule[key] = []interface{}{}
+		return
+	}
+	switch v := val.(type) {
+	case []interface{}:
+		return
+	case []string:
+		out := make([]interface{}, 0, len(v))
+		for _, item := range v {
+			out = append(out, item)
+		}
+		rule[key] = out
+	}
+}
+
 func describeResource(obj map[string]interface{}) string {
 	kind, _ := obj["kind"].(string)
 	name := kubernetes.GetMetadataString(obj, "name")
@@ -543,8 +1018,19 @@ func describeResource(obj map[string]interface{}) string {
 	return fmt.Sprintf("%s %s/%s", kind, namespace, name)
 }
 
+func resourceDisplayName(obj map[string]interface{}) (string, string) {
+	kind, _ := obj["kind"].(string)
+	name := kubernetes.GetMetadataString(obj, "name")
+	namespace := kubernetes.GetMetadataString(obj, "namespace")
+	if namespace == "" {
+		return kind, name
+	}
+	return kind, fmt.Sprintf("%s/%s", namespace, name)
+}
+
 func evaluateValidations(policy *admissionregistrationv1.ValidatingAdmissionPolicy, binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding, resource map[string]interface{}, namespace string, namespaceLabels map[string]string) (validationResult, error) {
 	resultData := validationResult{Compliant: true}
+	normalizeResourceForCEL(resource)
 
 	payload := map[string]interface{}{
 		"object":          resource,
@@ -786,14 +1272,29 @@ func parseNamespaces(arg string) []string {
 	return result
 }
 
-func mergeLabelMaps(dest, src map[string]map[string]string) map[string]map[string]string {
-	if dest == nil {
-		dest = make(map[string]map[string]string)
+func namespacesFromSelector(selector string) ([]string, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil, nil
 	}
-	for ns, labels := range src {
-		dest[ns] = convertPSANamespaceLabels(labels)
+	clientset, err := kubernetes.Init()
+	if err != nil {
+		return nil, err
 	}
-	return dest
+	nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(nsList.Items))
+	for _, ns := range nsList.Items {
+		if ns.Name != "" {
+			names = append(names, ns.Name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func extractPodsFromResources(resources []map[string]interface{}) ([]corev1.Pod, error) {
@@ -819,36 +1320,6 @@ func extractPodsFromResources(resources []map[string]interface{}) ([]corev1.Pod,
 	return pods, nil
 }
 
-func fetchNamespaceLabels(namespaces []string, all bool) (map[string]map[string]string, error) {
-	clientset, err := kubernetes.Init()
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]map[string]string)
-	if all || len(namespaces) == 0 {
-		nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return nil, err
-		}
-		for _, ns := range nsList.Items {
-			result[ns.Name] = convertPSANamespaceLabels(ns.Labels)
-		}
-		return result, nil
-	}
-
-	for _, ns := range namespaces {
-		if ns == "" {
-			continue
-		}
-		obj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), ns, metav1.GetOptions{})
-		if err != nil {
-			continue
-		}
-		result[ns] = convertPSANamespaceLabels(obj.Labels)
-	}
-	return result, nil
-}
-
 func countResourcesByKind(resources []map[string]interface{}) map[string]int {
 	totals := make(map[string]int)
 	seen := make(map[string]struct{})
@@ -863,6 +1334,21 @@ func countResourcesByKind(resources []map[string]interface{}) map[string]int {
 		}
 	}
 	return totals
+}
+
+func namespacesFromResources(resources []map[string]interface{}) []string {
+	if len(resources) == 0 {
+		return nil
+	}
+	namespaces := make([]string, 0, len(resources))
+	for _, res := range resources {
+		ns := kubernetes.GetMetadataString(res, "namespace")
+		if ns == "" {
+			continue
+		}
+		namespaces = append(namespaces, ns)
+	}
+	return uniqueSortedStrings(namespaces)
 }
 
 func renderReport(reportMode, format string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail, w io.Writer, style table.Style, useColor bool) error {
@@ -881,39 +1367,286 @@ func renderReport(reportMode, format string, reports []*bindingReport, resourceT
 	return nil
 }
 
-func renderJSONReport(reportMode string, reports []*bindingReport, resourceTotals map[string]int, details []resourceDetail, w io.Writer) error {
-	type jsonReport struct {
-		Report    string           `json:"report"`
-		Format    string           `json:"format"`
-		Data      []*bindingReport `json:"bindings"`
-		Totals    map[string]int   `json:"resourceTotals,omitempty"`
-		Resources []resourceDetail `json:"resources,omitempty"`
-	}
+type policyJSONReport struct {
+	Report    string           `json:"report"`
+	Format    string           `json:"format"`
+	Data      []*bindingReport `json:"bindings"`
+	Totals    map[string]int   `json:"resourceTotals,omitempty"`
+	Resources []resourceDetail `json:"resources,omitempty"`
+}
 
-	payload := jsonReport{
+func buildPolicyJSONReport(reportMode string, reports []*bindingReport, resourceTotals map[string]int, details []resourceDetail) policyJSONReport {
+	payload := policyJSONReport{
 		Report: reportMode,
 		Format: "json",
 		Totals: resourceTotals,
 	}
-
 	if len(details) > 0 {
 		payload.Resources = details
 	}
-
 	for _, br := range reports {
 		copyReport := *br
+		copyReport.Binding = ""
+		copyReport.Mode = ""
 		if reportMode != "all" {
 			copyReport.Violations = nil
 		}
 		payload.Data = append(payload.Data, &copyReport)
 	}
+	return payload
+}
 
+func renderJSONReport(reportMode string, reports []*bindingReport, resourceTotals map[string]int, details []resourceDetail, w io.Writer) error {
+	payload := buildPolicyJSONReport(reportMode, reports, resourceTotals, details)
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(w, string(encoded))
 	return nil
+}
+
+type namespaceJSONReport struct {
+	Report     string            `json:"report"`
+	Format     string            `json:"format"`
+	Namespaces []namespaceReport `json:"namespaces"`
+	Totals     map[string]int    `json:"resourceTotals,omitempty"`
+}
+
+func buildNamespaceJSONReport(reportMode string, reports []namespaceReport, resourceTotals map[string]int) namespaceJSONReport {
+	payload := namespaceJSONReport{
+		Report: reportMode,
+		Format: "json",
+		Totals: resourceTotals,
+	}
+	for _, res := range reports {
+		copyRes := res
+		if reportMode != "all" {
+			copyRes.Violations = nil
+		}
+		payload.Namespaces = append(payload.Namespaces, copyRes)
+	}
+	return payload
+}
+
+func renderNamespaceReport(reportMode, format string, reports []namespaceReport, resourceTotals map[string]int, w io.Writer, style table.Style, useColor bool) error {
+	switch format {
+	case "json":
+		payload := buildNamespaceJSONReport(reportMode, reports, resourceTotals)
+		encoded, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, string(encoded))
+	case "table":
+		printNamespaceTable(reports, w, style)
+		printResourceTotals(resourceTotals, w, style)
+		if reportMode == "all" {
+			printNamespaceViolationLogs(reports, w, useColor)
+		}
+	default:
+		return fmt.Errorf("unsupported format %s", format)
+	}
+	return nil
+}
+
+func renderResourceReport(reportMode, format string, reports []resourceReport, w io.Writer, style table.Style, useColor bool) error {
+	switch format {
+	case "json":
+		payload := buildResourceJSONReport(reportMode, reports)
+		encoded, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, string(encoded))
+	case "table":
+		printResourceViolationTable(reportMode, reports, w, style, useColor)
+	default:
+		return fmt.Errorf("unsupported format %s", format)
+	}
+	return nil
+}
+
+type resourceJSONReport struct {
+	Report    string           `json:"report"`
+	Format    string           `json:"format"`
+	Resources []resourceReport `json:"resources"`
+}
+
+func buildResourceJSONReport(reportMode string, reports []resourceReport) resourceJSONReport {
+	payload := resourceJSONReport{
+		Report: reportMode,
+		Format: "json",
+	}
+	for _, res := range reports {
+		copyRes := res
+		if reportMode != "all" {
+			copyRes.Violations = nil
+		}
+		payload.Resources = append(payload.Resources, copyRes)
+	}
+	return payload
+}
+
+func printResourceViolationTable(reportMode string, reports []resourceReport, w io.Writer, style table.Style, useColor bool) {
+	if len(reports) == 0 {
+		t := table.NewWriter()
+		t.SetOutputMirror(w)
+		t.SetStyle(style)
+		t.AppendHeader(table.Row{"Resource", "Violations (Bindings)", "Violations", "Policies"})
+		t.AppendSeparator()
+		t.AppendRow(table.Row{"Totals", 0, 0, ""})
+		fmt.Fprintln(w)
+		t.Render()
+		return
+	}
+	t := table.NewWriter()
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
+	t.AppendHeader(table.Row{"Resource", "Violations (Bindings)", "Violations", "Policies"})
+	totalViolations := 0
+	totalPolicyViolations := 0
+	currentKind := ""
+	for _, report := range reports {
+		if report.Kind != "" && report.Kind != currentKind {
+			if currentKind != "" {
+				t.AppendSeparator()
+				t.AppendRow(table.Row{"", "", ""})
+			}
+			currentKind = report.Kind
+			t.AppendRow(table.Row{fmt.Sprintf("Kind: %s", report.Kind), "", "", ""})
+		}
+		uniquePolicies := uniqueViolationFields(report.Violations, func(v violationDetail) string { return v.Policy })
+		policyCount := len(uniquePolicies)
+		t.AppendRow(table.Row{
+			report.Resource,
+			report.TotalViolations,
+			policyCount,
+			strings.Join(uniquePolicies, "\n"),
+		})
+		totalViolations += report.TotalViolations
+		totalPolicyViolations += policyCount
+	}
+	t.AppendSeparator()
+	t.AppendRow(table.Row{"Totals", totalViolations, totalPolicyViolations, ""})
+	fmt.Fprintln(w)
+	t.Render()
+	if reportMode == "all" {
+		printResourceViolationLogs(reports, w, useColor)
+	}
+}
+
+func uniqueViolationFields(violations []violationDetail, fn func(violationDetail) string) []string {
+	seen := make(map[string]struct{})
+	var values []string
+	for _, violation := range violations {
+		value := strings.TrimSpace(fn(violation))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func printResourceViolationLogs(reports []resourceReport, w io.Writer, useColor bool) {
+	fmt.Fprintln(w, "\nViolations")
+	found := false
+	for _, res := range reports {
+		if len(res.Violations) == 0 {
+			continue
+		}
+		found = true
+		if res.Kind != "" {
+			fmt.Fprintf(w, "Resource: %s %s\n", res.Kind, res.Resource)
+		} else {
+			fmt.Fprintf(w, "Resource: %s\n", res.Resource)
+		}
+		byPolicy := make(map[string][]violationDetail)
+		for _, violation := range res.Violations {
+			byPolicy[violation.Policy] = append(byPolicy[violation.Policy], violation)
+		}
+		policies := make([]string, 0, len(byPolicy))
+		for policy := range byPolicy {
+			policies = append(policies, policy)
+		}
+		sort.Strings(policies)
+		for _, policy := range policies {
+			violations := byPolicy[policy]
+			fmt.Fprintf(w, "Policy : %s\n", policy)
+			for _, violation := range violations {
+				severity, formatter := violationSeverityColor(violation.Actions)
+				if useColor {
+					formatter.Fprintf(w, "[%s] Binding %s\n", strings.ToUpper(severity), violation.Binding)
+				} else {
+					fmt.Fprintf(w, "[%s] Binding %s\n", strings.ToUpper(severity), violation.Binding)
+				}
+				fmt.Fprintf(w, "Message : %s\n", violation.Message)
+			}
+		}
+	}
+	if !found {
+		fmt.Fprintln(w, "No violations detected.")
+	}
+}
+
+func printNamespaceTable(reports []namespaceReport, w io.Writer, style table.Style) {
+	if len(reports) == 0 {
+		t := table.NewWriter()
+		t.SetOutputMirror(w)
+		t.SetStyle(style)
+		t.AppendHeader(table.Row{"Namespace", "Total", "Compliant", "NonCompliant"})
+		t.AppendSeparator()
+		t.AppendRow(table.Row{"Totals", 0, 0, 0})
+		fmt.Fprintln(w)
+		t.Render()
+		return
+	}
+	t := table.NewWriter()
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
+	t.AppendHeader(table.Row{"Namespace", "Total Evaluated", "Compliant", "NonCompliant"})
+	var total, compliant, non int
+	for _, res := range reports {
+		t.AppendRow(table.Row{res.Namespace, res.Total, res.Compliant, res.NonCompliant})
+		total += res.Total
+		compliant += res.Compliant
+		non += res.NonCompliant
+	}
+	t.AppendSeparator()
+	t.AppendRow(table.Row{"Totals", total, compliant, non})
+	fmt.Fprintln(w)
+	t.Render()
+}
+
+func printNamespaceViolationLogs(reports []namespaceReport, w io.Writer, useColor bool) {
+	fmt.Fprintln(w, "\nViolations")
+	found := false
+	for _, res := range reports {
+		if len(res.Violations) == 0 {
+			continue
+		}
+		found = true
+		fmt.Fprintf(w, "Namespace: %s\n", res.Namespace)
+		for _, violation := range res.Violations {
+			severity, formatter := violationSeverityColor(violation.Actions)
+			if useColor {
+				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
+			} else {
+				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
+			}
+			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
+			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
+		}
+	}
+	if !found {
+		fmt.Fprintln(w, "No violations detected.")
+	}
 }
 
 func printSummaryTables(reports []*bindingReport, w io.Writer, style table.Style) {
@@ -930,7 +1663,7 @@ func printSummaryTables(reports []*bindingReport, w io.Writer, style table.Style
 	t.AppendHeader(table.Row{"Policy", "Binding", "Mode", "Total", "Compliant", "NonCompliant"})
 	var totalTotal, totalCompliant, totalNon int
 	for _, br := range reports {
-		t.AppendRow(table.Row{br.Policy, br.Binding, br.Mode, br.Total, br.Compliant, br.NonCompliant})
+		t.AppendRow(table.Row{br.Policy, "", "", br.Total, br.Compliant, br.NonCompliant})
 		totalTotal += br.Total
 		totalCompliant += br.Compliant
 		totalNon += br.NonCompliant
@@ -1002,27 +1735,6 @@ func collectResourceDetails(resources []map[string]interface{}) []resourceDetail
 	return details
 }
 
-func printResourceNames(details []resourceDetail, w io.Writer, style table.Style) {
-	if len(details) == 0 {
-		return
-	}
-
-	t := table.NewWriter()
-	t.SetOutputMirror(w)
-	t.SetStyle(style)
-	t.SetTitle("Resources")
-	t.AppendHeader(table.Row{"Kind", "Namespace", "Name"})
-	for _, detail := range details {
-		ns := detail.Namespace
-		if ns == "" {
-			ns = "<cluster>"
-		}
-		t.AppendRow(table.Row{detail.Kind, ns, detail.Name})
-	}
-	fmt.Fprintln(w)
-	t.Render()
-}
-
 func printViolationLogs(reports []*bindingReport, w io.Writer, useColor bool) {
 	fmt.Fprintln(w, "\nViolations")
 	found := false
@@ -1082,218 +1794,6 @@ func lookupBoolFlag(cmd *cobra.Command, name string) bool {
 		}
 	}
 	return lookupBoolFlag(cmd.Parent(), name)
-}
-
-func lookupStringFlag(cmd *cobra.Command, name string) string {
-	if cmd == nil {
-		return ""
-	}
-	if flag := cmd.Flags().Lookup(name); flag != nil {
-		return flag.Value.String()
-	}
-	return lookupStringFlag(cmd.Parent(), name)
-}
-
-// PSA Validation
-
-func newValidatePSACmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "psa",
-		Short: "Validate Pod Security Admission labels",
-		RunE:  runValidatePSA,
-	}
-	cmd.Flags().StringP("resources", "r", "", "Path to resource manifest file or directory")
-	cmd.Flags().Bool("remote-namespaces", false, "Fetch namespace labels from the Kubernetes API")
-	cmd.Flags().String("level", "", "PSS level to evaluate: baseline or restricted")
-	return cmd
-}
-
-func runValidatePSA(cmd *cobra.Command, _ []string) error {
-	nsArg := lookupStringFlag(cmd, "namespaces")
-	allNamespaces := lookupBoolFlag(cmd, "all-namespaces")
-	format := strings.ToLower(lookupStringFlag(cmd, "format"))
-	outputPath := strings.TrimSpace(lookupStringFlag(cmd, "output"))
-	report := strings.ToLower(lookupStringFlag(cmd, "report"))
-	level := strings.ToLower(strings.TrimSpace(cmd.Flags().Lookup("level").Value.String()))
-	if format != "table" && format != "json" {
-		return fmt.Errorf("invalid output format %s, expected table or json", format)
-	}
-	if report != "summary" && report != "all" {
-		return fmt.Errorf("invalid report type %s, expected summary or all", report)
-	}
-	if level != "" && level != "baseline" && level != "restricted" {
-		return fmt.Errorf("invalid level %s, expected baseline or restricted", level)
-	}
-
-	resourcePath := cmd.Flags().Lookup("resources").Value.String()
-	remoteNamespaces := lookupBoolFlag(cmd, "remote-namespaces")
-
-	if resourcePath == "" && !remoteNamespaces {
-		return fmt.Errorf("either --resources or --remote-namespaces must be specified")
-	}
-	if allNamespaces && !remoteNamespaces {
-		return fmt.Errorf("--all-namespaces can only be used with --remote-namespaces")
-	}
-	if nsArg != "" && !remoteNamespaces {
-		return fmt.Errorf("--namespaces can only be used with --remote-namespaces")
-	}
-
-	namespaces := parseNamespaces(nsArg)
-	if allNamespaces && len(namespaces) > 0 {
-		return fmt.Errorf("--all-namespaces cannot be used together with --namespaces")
-	}
-	if len(namespaces) == 0 && !allNamespaces && remoteNamespaces {
-		namespaces = []string{kubernetes.ActiveNamespace()}
-	}
-
-	progressEnabled := true
-	namespaceLabels := make(map[string]map[string]string)
-	var pods []corev1.Pod
-	var resources []map[string]interface{}
-
-	if resourcePath != "" {
-		localRes, localNS, err := loadLocalResources(resourcePath)
-		if err != nil {
-			return err
-		}
-		localRes = filterResourcesByNamespaces(localRes, namespaces, allNamespaces)
-		namespaceLabels = mergeLabelMaps(namespaceLabels, localNS)
-		resources = append(resources, localRes...)
-		localPods, err := extractPodsFromResources(localRes)
-		if err != nil {
-			return err
-		}
-		pods = append(pods, localPods...)
-	}
-
-	if remoteNamespaces {
-		remoteNS, err := fetchNamespaceLabels(namespaces, allNamespaces)
-		if err != nil {
-			return err
-		}
-		namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
-	}
-
-	policiesPath, bindingsPath, ok, err := locatePSAPolicies()
-	if err != nil {
-		return err
-	}
-	compliance := map[string]psaComplianceCounts{}
-	vaps := []admissionregistrationv1.ValidatingAdmissionPolicy{}
-	bindings := []admissionregistrationv1.ValidatingAdmissionPolicyBinding{}
-	if ok {
-		policyFiles, err := collectManifestFilesRecursive(policiesPath)
-		if err != nil {
-			return err
-		}
-		bindingFiles := policyFiles
-		if bindingsPath != policiesPath {
-			bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
-			if err != nil {
-				return err
-			}
-		}
-		totalFiles := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
-		err = withProgress("Reading PSA policies", totalFiles, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = loadPoliciesFromFilesWithProgress(policyFiles, func() {
-				tracker.Increment(1)
-			})
-			if err != nil {
-				return err
-			}
-			bindings, err = loadBindingsFromFilesWithProgress(bindingFiles, func() {
-				tracker.Increment(1)
-			})
-			return err
-		})
-		if err != nil {
-			return err
-		}
-		if resourcePath == "" && remoteNamespaces {
-			scope := kubernetes.ResourceScopeSelected
-			if allNamespaces {
-				scope = kubernetes.ResourceScopeAllNamespaces
-			}
-			total := maxInt64(int64(len(vaps)), 1)
-			err = withProgress("Fetching remote resources", total, progressEnabled, func(tracker *progress.Tracker) error {
-				remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, scope, namespaces, func() {
-					tracker.Increment(1)
-				})
-				if err != nil {
-					return err
-				}
-				resources = append(resources, remoteRes...)
-				namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
-				remotePods, err := extractPodsFromResources(remoteRes)
-				if err != nil {
-					return err
-				}
-				pods = append(pods, remotePods...)
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-		}
-		totalWork := len(resources) * len(bindings)
-		if totalWork > 0 {
-			tracker, stop := startProgress("Evaluating PSA compliance", int64(totalWork), progressEnabled)
-			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, level, func() {
-				tracker.Increment(1)
-			})
-			stop()
-		} else {
-			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, level, nil)
-		}
-		if err != nil {
-			return err
-		}
-	} else {
-		root, err := psaPoliciesDir()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "PSA policy bundle not found in %s. Run `kubeapt policies psa download` to install.\n", root)
-	}
-
-	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, namespaces, allNamespaces, compliance)
-	hasViolations := false
-	for _, res := range results {
-		if res.NonCompliant > 0 {
-			hasViolations = true
-			break
-		}
-	}
-
-	writer := io.Writer(os.Stdout)
-	style := table.StyleRounded
-	if outputPath != "" {
-		f, err := os.Create(outputPath)
-		if err != nil {
-			return fmt.Errorf("failed to open output file: %w", err)
-		}
-		defer f.Close()
-		writer = f
-		style = table.StyleDefault
-	}
-
-	switch format {
-	case "json":
-		if err := renderPSAJSON(report, results, writer); err != nil {
-			return err
-		}
-	default:
-		printPSATable(results, usesKolteq, writer, style)
-		if report == "all" {
-			printPSAViolationLogs(results, writer, false)
-		}
-	}
-
-	if hasViolations && isPipeline(cmd) {
-		return fmt.Errorf("psa violations detected")
-	}
-
-	return nil
 }
 
 type psaNamespaceResult struct {
@@ -1398,25 +1898,6 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 	return sorted, usesKolteq
 }
 
-func renderPSAJSON(report string, results []psaNamespaceResult, w io.Writer) error {
-	payload := make([]psaNamespaceResult, 0, len(results))
-	for _, res := range results {
-		copyRes := res
-		if report != "all" {
-			copyRes.Violations = nil
-		} else {
-			copyRes.Violations = mergePSAViolations(copyRes.Violations)
-		}
-		payload = append(payload, copyRes)
-	}
-	data, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(w, string(data))
-	return nil
-}
-
 func printPSATable(results []psaNamespaceResult, kolteq bool, w io.Writer, style table.Style) {
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
@@ -1442,133 +1923,6 @@ func printPSATable(results []psaNamespaceResult, kolteq bool, w io.Writer, style
 	}
 	fmt.Fprintln(w)
 	t.Render()
-}
-
-func printPSAViolationLogs(results []psaNamespaceResult, w io.Writer, useColor bool) {
-	fmt.Fprintln(w, "\nViolations")
-	found := false
-	for _, res := range results {
-		for _, violation := range mergePSAViolations(res.Violations) {
-			found = true
-			_, formatter := violationSeverityColor(violation.Actions)
-			label := strings.ToUpper(strings.Join(formatViolationActions(violation.Actions), "/"))
-			if useColor {
-				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
-			} else {
-				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
-			}
-			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
-			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
-			if violation.Path != "" {
-				fmt.Fprintf(w, "Path     : %s\n", violation.Path)
-			}
-		}
-	}
-	if !found {
-		fmt.Fprintln(w, "No violations detected.")
-	}
-}
-
-func mergePSAViolations(violations []violationDetail) []violationDetail {
-	type agg struct {
-		detail      violationDetail
-		actionSet   map[string]struct{}
-		bestAction  int
-		seenBinding bool
-	}
-	aggMap := make(map[string]*agg)
-	for _, v := range violations {
-		base := psaBindingBase(v.Binding)
-		key := strings.Join([]string{v.Policy, base, v.Resource, v.Message, v.Path}, "|")
-		entry, ok := aggMap[key]
-		if !ok {
-			entry = &agg{
-				detail:    violationDetail{Policy: v.Policy, Binding: v.Binding, Resource: v.Resource, Message: v.Message, Path: v.Path},
-				actionSet: make(map[string]struct{}),
-			}
-			aggMap[key] = entry
-		}
-		for _, action := range v.Actions {
-			canonical := canonicalAction(action)
-			entry.actionSet[canonical] = struct{}{}
-			if priority := actionPriority(canonical); priority > entry.bestAction {
-				entry.bestAction = priority
-				entry.detail.Binding = v.Binding
-				entry.seenBinding = true
-			}
-		}
-		if !entry.seenBinding {
-			entry.detail.Binding = v.Binding
-		}
-	}
-
-	merged := make([]violationDetail, 0, len(aggMap))
-	for _, entry := range aggMap {
-		entry.detail.Actions = formatViolationActionsFromSet(entry.actionSet)
-		merged = append(merged, entry.detail)
-	}
-	return merged
-}
-
-func psaBindingBase(name string) string {
-	for _, suffix := range []string{"-deny", "-audit", "-warn"} {
-		if strings.HasSuffix(name, suffix) {
-			return strings.TrimSuffix(name, suffix)
-		}
-	}
-	return name
-}
-
-func canonicalAction(action string) string {
-	switch strings.ToLower(action) {
-	case "deny":
-		return "Deny"
-	case "warn":
-		return "Warn"
-	case "audit":
-		return "Audit"
-	default:
-		return action
-	}
-}
-
-func actionPriority(action string) int {
-	switch strings.ToLower(action) {
-	case "deny":
-		return 3
-	case "audit":
-		return 2
-	case "warn":
-		return 1
-	default:
-		return 0
-	}
-}
-
-func formatViolationActions(actions []string) []string {
-	return formatViolationActionsFromSet(listToSet(actions))
-}
-
-func formatViolationActionsFromSet(actions map[string]struct{}) []string {
-	ordered := make([]string, 0, len(actions))
-	for _, action := range []string{"Deny", "Warn", "Audit"} {
-		if _, ok := actions[action]; ok {
-			ordered = append(ordered, action)
-			delete(actions, action)
-		}
-	}
-	for action := range actions {
-		ordered = append(ordered, action)
-	}
-	return ordered
-}
-
-func listToSet(actions []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(actions))
-	for _, action := range actions {
-		set[canonicalAction(action)] = struct{}{}
-	}
-	return set
 }
 
 func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode string, kolteq bool) string {

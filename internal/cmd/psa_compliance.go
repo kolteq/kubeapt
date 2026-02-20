@@ -19,7 +19,7 @@ type psaComplianceCounts struct {
 	Violations   []violationDetail
 }
 
-func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreSelectors bool, level string, onProgress func()) (map[string]psaComplianceCounts, error) {
+func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreBindings bool, level string, onProgress func()) (map[string]psaComplianceCounts, error) {
 	results := make(map[string]psaComplianceCounts)
 	if len(policies) == 0 || len(bindings) == 0 || len(resources) == 0 {
 		return results, nil
@@ -97,8 +97,10 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 						if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
 							continue
 						}
-						if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, ignoreSelectors, ignoreSelectors) {
-							continue
+						if !ignoreBindings {
+							if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, false, false) {
+								continue
+							}
 						}
 
 						result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)

@@ -17,8 +17,10 @@ import (
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/version"
 	kubeclient "k8s.io/client-go/kubernetes"
 
+	"github.com/kolteq/kubeapt/internal/config"
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
 
@@ -39,22 +41,150 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	fmt.Println("[1/3] Inspecting namespaces and admission controllers...")
+	fmt.Println("[1/4] Inspecting namespaces and admission controllers...")
 	if err := reportPSSAndPolicies(clientset); err != nil {
 		return err
 	}
 
-	fmt.Println("\n[2/3] Inspecting built-in admission plugins...")
+	fmt.Println("\n[2/4] Inspecting built-in admission plugins...")
 	if err := reportBuiltInAdmissionControllers(clientset); err != nil {
 		return err
 	}
 
-	fmt.Println("\n[3/3] Inspecting registered webhooks...")
+	fmt.Println("\n[3/4] Inspecting registered webhooks...")
 	if err := reportWebhooks(clientset); err != nil {
 		return err
 	}
 
+	fmt.Println("\n[4/4] Checking policy updates...")
+	if err := reportPolicyUpdates(cmd); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func reportPolicyUpdates(cmd *cobra.Command) error {
+	out := cmd.OutOrStdout()
+
+	bundlesLocal, err := localBundleIndex()
+	if err != nil {
+		return err
+	}
+	bundlesRemote, err := fetchBundleIndex(cmd.Context(), bundleIndexURL)
+	if err != nil {
+		return err
+	}
+	remoteLatest := make(map[string]string, len(bundlesRemote))
+	for _, bundle := range bundlesRemote {
+		if bundle.Name != "" && bundle.LatestVersion != "" {
+			remoteLatest[bundle.Name] = bundle.LatestVersion
+		}
+	}
+
+	var bundleUpdates []string
+	for _, bundle := range bundlesLocal {
+		if len(bundle.Versions) == 0 {
+			continue
+		}
+		localLatest := latestVersion(bundle.Versions)
+		remote := remoteLatest[bundle.Name]
+		if remote != "" && remote != localLatest {
+			bundleUpdates = append(bundleUpdates, fmt.Sprintf("Bundle %s: %s -> %s", bundle.Name, localLatest, remote))
+		}
+	}
+
+	installedIndex, err := installedBundleVersionIndex(cmd.Context())
+	if err != nil {
+		return err
+	}
+	var installedUpdates []string
+	for bundleName, versions := range installedIndex {
+		var installed []string
+		for v := range versions {
+			installed = append(installed, v)
+		}
+		latestInstalled := latestVersion(installed)
+		remote := remoteLatest[bundleName]
+		if latestInstalled == "" || remote == "" {
+			continue
+		}
+		if isVersionNewer(remote, latestInstalled) {
+			installedUpdates = append(installedUpdates, fmt.Sprintf("Bundle %s: %s -> %s", bundleName, latestInstalled, remote))
+		}
+	}
+
+	policiesLocal, err := config.PolicyVersions()
+	if err != nil {
+		return err
+	}
+	policiesRemote, err := fetchPoliciesIndex(cmd.Context(), policiesIndexURL)
+	if err != nil {
+		return err
+	}
+	var policyUpdate string
+	if len(policiesLocal) > 0 && policiesRemote.LatestVersion != "" {
+		localLatest := policiesLocal[len(policiesLocal)-1]
+		if localLatest != policiesRemote.LatestVersion {
+			policyUpdate = fmt.Sprintf("Policies: %s -> %s", localLatest, policiesRemote.LatestVersion)
+		}
+	}
+
+	if len(bundleUpdates) == 0 && len(installedUpdates) == 0 && policyUpdate == "" {
+		fmt.Fprintln(out, "All bundles and policies are up to date.")
+		return nil
+	}
+
+	if len(bundleUpdates) > 0 {
+		fmt.Fprintln(out, "Bundle updates available:")
+		for _, line := range bundleUpdates {
+			fmt.Fprintf(out, "  - %s (run `kubeapt bundles download <bundle-name>`)\n", line)
+		}
+	}
+	if len(installedUpdates) > 0 {
+		fmt.Fprintln(out, "Installed bundle updates available:")
+		for _, line := range installedUpdates {
+			fmt.Fprintf(out, "  - %s\n", line)
+		}
+	}
+	if policyUpdate != "" {
+		fmt.Fprintln(out, "Policy updates available:")
+		fmt.Fprintf(out, "  - %s (run `kubeapt policies download`)\n", policyUpdate)
+	}
+	return nil
+}
+
+func latestVersion(versions []string) string {
+	if len(versions) == 0 {
+		return ""
+	}
+	var latest *version.Version
+	latestRaw := ""
+	for _, v := range versions {
+		parsed, err := version.ParseSemantic(v)
+		if err != nil {
+			continue
+		}
+		if latest == nil || parsed.GreaterThan(latest) {
+			latest = parsed
+			latestRaw = v
+		}
+	}
+	if latestRaw != "" {
+		return latestRaw
+	}
+	sorted := append([]string(nil), versions...)
+	sort.Strings(sorted)
+	return sorted[len(sorted)-1]
+}
+
+func isVersionNewer(latest, current string) bool {
+	latestParsed, errLatest := version.ParseSemantic(latest)
+	currentParsed, errCurrent := version.ParseSemantic(current)
+	if errLatest == nil && errCurrent == nil {
+		return latestParsed.GreaterThan(currentParsed)
+	}
+	return latest != current
 }
 
 func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
@@ -78,7 +208,8 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		namespaceLabels[ns.Name] = convertPSANamespaceLabels(ns.Labels)
 	}
 
-	policiesPath, bindingsPath, ok, err := locatePSAPolicies()
+	bundleName := "pod-security-admission"
+	policiesPath, bindingsPath, ok, err := config.LocateBundleFiles(bundleName, "")
 	if err != nil {
 		return err
 	}
@@ -92,26 +223,23 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 	)
 
 	if ok {
-		policyFiles, err := collectManifestFilesRecursive(policiesPath)
+		policyFiles, err := config.CollectManifestFilesRecursive(policiesPath)
 		if err != nil {
 			return err
 		}
-		bindingFiles := policyFiles
-		if bindingsPath != policiesPath {
-			bindingFiles, err = collectManifestFilesRecursive(bindingsPath)
-			if err != nil {
-				return err
-			}
+		bindingFiles, err := config.CollectManifestFilesRecursive(bindingsPath)
+		if err != nil {
+			return err
 		}
 		totalFiles := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
 		err = withProgress("Reading PSA policies", totalFiles, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = loadPoliciesFromFilesWithProgress(policyFiles, func() {
+			vaps, err = config.LoadPoliciesFromFilesWithProgress(policyFiles, func() {
 				tracker.Increment(1)
 			})
 			if err != nil {
 				return err
 			}
-			bindings, err = loadBindingsFromFilesWithProgress(bindingFiles, func() {
+			bindings, err = config.LoadBindingsFromFilesWithProgress(bindingFiles, func() {
 				tracker.Increment(1)
 			})
 			return err
@@ -129,7 +257,7 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 					return err
 				}
 				resources = append(resources, remoteRes...)
-				namespaceLabels = mergeLabelMaps(namespaceLabels, remoteNS)
+				namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNS, nil, true)
 				return nil
 			})
 			if err != nil {
@@ -155,16 +283,16 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 			return err
 		}
 	} else {
-		root, err := psaPoliciesDir()
+		root, err := config.BundleDir(bundleName)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "PSA policy bundle not found in %s. Run `kubeapt policies psa download` to install.\n", root)
+		fmt.Fprintf(os.Stderr, "Policy bundle %s not found in %s. Run `kubeapt bundles download %s` to install.\n", bundleName, root, bundleName)
 	}
 
 	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
 	printPSATable(results, usesKolteq, os.Stdout, table.StyleRounded)
-	fmt.Fprintln(os.Stdout, "For details run `kubeapt validate psa --remote-namespaces --all-namespaces --report all`")
+	fmt.Fprintln(os.Stdout, "For details run `kubeapt validate --bundle pod-security-admission --psa-level <baseline|restricted> --all-namespaces --report all`")
 	fmt.Fprintln(os.Stdout)
 
 	vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()

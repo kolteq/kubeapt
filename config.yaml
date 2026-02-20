@@ -1,0 +1,46 @@
+# Usage of Policy Bundles (kolteq-best-practices,pod-security-admission) Default: kolteq-best-practices
+bundles: ""
+
+# Everything scan,validate related
+scan:
+  # Ignore bindings -> Match all ValidatingAdmissionPolicies on all resources regardless the bindings (true/false) Default: false
+  ignore-bindings: ""
+
+  # If local policies, bindings or resources should be used.
+  manifests:
+    # Path to ValidatingAdmissionPolicies file/folder
+    policies: ""
+
+    # Path to ValidatingAdmissionPolicyBindings file/folder
+    bindings: ""
+
+    # Path to Kubernetes resources file/folder
+    resources: ""
+
+  ##########
+  # Output #
+  ##########
+  # All details or just a summary (summary, all) Default: summary
+  report: ""
+
+  # Output format (table, json) Default: table
+  format: ""
+
+# Log Level (debug, info, warn, error) Default: info
+log-level: ""
+
+# Everything ci-cd related
+pipeline:
+  # If runs in CI/CD (true/false) Default: false
+  enable: ""
+
+# Everything Kubernetes related
+kubernetes:
+  # Path to the kubeconfig Default: ~/.kube/config
+  kubeconfig: ""
+
+  # Comma seperated list of namespaces to scan e.g. "prod,dev". Ignored when using all-namespaces Default: Namespace from kubeconfig
+  namespaces: ""
+
+  # Wether to scan all namespaces (true/false) Default: false
+  all-namespaces: false

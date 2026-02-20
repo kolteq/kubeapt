@@ -12,11 +12,14 @@ import (
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
 
+const version = "1.0.0"
+
 var (
 	rootCmd = &cobra.Command{
-		Use:   "kubeapt",
-		Short: "Kubernetes Admission Policy Toolkit",
-		Long:  `CLI toolkit for validating Kubernetes admission policies, Pod Security Admission labels, and cluster webhook safeguards.`,
+		Use:     "kubeapt",
+		Short:   "Kubernetes Admission Policy Toolkit",
+		Long:    `CLI toolkit for validating Kubernetes admission policies, Pod Security Admission labels, and cluster webhook safeguards.`,
+		Version: version,
 	}
 	logLevel       string
 	kubeconfigPath string
@@ -39,6 +42,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.AddCommand(cmd.ValidateCmd(getLogLevel))
 	rootCmd.AddCommand(cmd.ScanCmd())
+	rootCmd.AddCommand(cmd.BundleCmd())
 	rootCmd.AddCommand(cmd.PoliciesCmd())
 }
 

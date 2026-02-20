@@ -6,6 +6,7 @@ package kubernetes
 import (
 	"os"
 	"strings"
+	"sync"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -15,6 +16,7 @@ import (
 var (
 	kubeconfigPath  string
 	activeNamespace = "default"
+	warningsOnce    sync.Once
 )
 
 func SetKubeconfig(path string) {
@@ -30,6 +32,10 @@ func ActiveNamespace() string {
 }
 
 func Config() (*rest.Config, error) {
+	warningsOnce.Do(func() {
+		rest.SetDefaultWarningHandler(rest.NoWarnings{})
+	})
+
 	var config *rest.Config
 	var err error
 
@@ -103,4 +109,34 @@ func detectInClusterNamespace() string {
 		return detectNamespace(kubeconfigPath)
 	}
 	return "default"
+}
+
+func ClusterName() string {
+	if kubeconfigPath != "" {
+		return detectClusterName(kubeconfigPath)
+	}
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	kubeconfig := loadingRules.GetDefaultFilename()
+	return detectClusterName(kubeconfig)
+}
+
+func detectClusterName(path string) string {
+	if path == "" {
+		return ""
+	}
+	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
+	configOverrides := &clientcmd.ConfigOverrides{}
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+	rawConfig, err := clientConfig.RawConfig()
+	if err != nil {
+		return ""
+	}
+	if rawConfig.CurrentContext == "" {
+		return ""
+	}
+	ctx, ok := rawConfig.Contexts[rawConfig.CurrentContext]
+	if !ok || ctx == nil {
+		return ""
+	}
+	return ctx.Cluster
 }

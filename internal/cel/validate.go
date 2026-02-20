@@ -34,6 +34,7 @@ func Evaluate(expr string, payload map[string]any) (interface{}, error) {
 		cel.Variable("variables", cel.DynType),
 		cel.Variable("resource", cel.DynType),
 		ext.Strings(),
+		ext.TwoVarComprehensions(),
 	)
 	if err != nil {
 		return nil, err
