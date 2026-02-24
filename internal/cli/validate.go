@@ -1,7 +1,7 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -29,13 +29,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"github.com/kolteq/kubeapt/internal/cel"
 	"github.com/kolteq/kubeapt/internal/config"
+	"github.com/kolteq/kubeapt/internal/format"
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 	"github.com/kolteq/kubeapt/internal/logging"
+	"github.com/kolteq/kubeapt/internal/worker"
 )
 
-var getLogLevel func() string
+var logLevelProvider func() string
 
 type violationDetail struct {
 	Policy   string   `json:"policy"`
@@ -71,23 +72,12 @@ type resourceReport struct {
 	Violations      []violationDetail `json:"violations,omitempty"`
 }
 
-type violationRecord struct {
-	Message string
-	Path    string
-	Actions []string
-}
-
-type validationResult struct {
-	Compliant  bool
-	Violations []violationRecord
-}
-
-func ValidateCmd(logLevelGetter func() string) *cobra.Command {
-	getLogLevel = logLevelGetter
+func ValidateCmd(getLogLevel func() string) *cobra.Command {
+	logLevelProvider = getLogLevel
 	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate admission policies against resources",
-		RunE:  runValidateVAP,
+		RunE:  runValidate,
 	}
 	cmd.PersistentFlags().Bool("pipeline", false, "Indicate the command runs inside CI/CD")
 	cmd.PersistentFlags().BoolP("all-namespaces", "A", false, "Use all namespaces instead of the active one")
@@ -109,7 +99,7 @@ func ValidateCmd(logLevelGetter func() string) *cobra.Command {
 	return cmd
 }
 
-func runValidateVAP(cmd *cobra.Command, _ []string) error {
+func runValidate(cmd *cobra.Command, _ []string) error {
 	flags := cmd.Flags()
 	bundleName, err := flags.GetString("bundle")
 	if err != nil {
@@ -139,11 +129,11 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	psaLevelRaw, err := flags.GetString("psa-level")
+	psaLevelInput, err := flags.GetString("psa-level")
 	if err != nil {
 		return err
 	}
-	viewRaw, err := flags.GetString("view")
+	viewInput, err := flags.GetString("view")
 	if err != nil {
 		return err
 	}
@@ -165,14 +155,14 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	reportMode := strings.ToLower(cmd.Flag("report").Value.String())
-	format := strings.ToLower(cmd.Flag("format").Value.String())
+	outputFormat := strings.ToLower(cmd.Flag("format").Value.String())
 	outputPath := strings.TrimSpace(cmd.Flag("output").Value.String())
 
 	if reportMode != "summary" && reportMode != "all" {
 		return fmt.Errorf("invalid report type %s, expected summary or all", reportMode)
 	}
-	if format != "table" && format != "json" {
-		return fmt.Errorf("invalid output format %s, expected table or json", format)
+	if outputFormat != "table" && outputFormat != "json" {
+		return fmt.Errorf("invalid output format %s, expected table or json", outputFormat)
 	}
 
 	if bundleName != "" && (policyFile != "" || bindingFile != "" || policyName != "") {
@@ -193,7 +183,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "No bindings provided, enabling --ignore-bindings")
 	}
 
-	psaLevel := strings.ToLower(strings.TrimSpace(psaLevelRaw))
+	psaLevel := strings.ToLower(strings.TrimSpace(psaLevelInput))
 	if psaLevel != "" && psaLevel != "baseline" && psaLevel != "restricted" {
 		return fmt.Errorf("invalid psa level %s, expected baseline or restricted", psaLevel)
 	}
@@ -205,7 +195,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--psa-level is only supported with --bundle pod-security-admission")
 	}
 
-	view := strings.ToLower(strings.TrimSpace(viewRaw))
+	view := strings.ToLower(strings.TrimSpace(viewInput))
 	if view == "" {
 		if bundleName != "" {
 			view = "namespace"
@@ -240,7 +230,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		namespaces = []string{kubernetes.ActiveNamespace()}
 	}
 
-	if err := logging.Init(logFile, getLogLevel()); err != nil {
+	if err := logging.Init(logFile, logLevelProvider()); err != nil {
 		return err
 	}
 	defer logging.Close()
@@ -259,10 +249,13 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		tableStyle = table.StyleDefault
 		useColor = false
 	}
+	if outputFormat == "json" && outputPath == "" {
+		progressEnabled = false
+	}
 
 	startTime := time.Now()
 
-	var vaps []admissionregistrationv1.ValidatingAdmissionPolicy
+	var policies []admissionregistrationv1.ValidatingAdmissionPolicy
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 
 	switch {
@@ -320,7 +313,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		}
 		total := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
 		err = withProgress("Reading policies", total, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = config.LoadPoliciesFromFilesWithProgress(policyFiles, func() {
+			policies, err = config.LoadPoliciesFromFilesWithProgress(policyFiles, func() {
 				tracker.Increment(1)
 			})
 			if err != nil {
@@ -353,7 +346,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		}
 		total := maxInt64(int64(policyFiles), 1)
 		err = withProgress("Reading policies", total, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = kubernetes.GetLocalValidatingAdmissionPoliciesWithProgress(policyPath, func(string) {
+			policies, err = kubernetes.LoadValidatingAdmissionPoliciesWithProgress(policyPath, func(string) {
 				tracker.Increment(1)
 			})
 			return err
@@ -380,13 +373,13 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		}
 		total := maxInt64(int64(policyFiles+bindingFiles), 1)
 		err = withProgress("Reading policies", total, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = kubernetes.GetLocalValidatingAdmissionPoliciesWithProgress(policyFile, func(string) {
+			policies, err = kubernetes.LoadValidatingAdmissionPoliciesWithProgress(policyFile, func(string) {
 				tracker.Increment(1)
 			})
 			if err != nil {
 				return err
 			}
-			bindings, err = kubernetes.GetLocalValidatingAdmissionPolicyBindingsWithProgress(bindingFile, func(string) {
+			bindings, err = kubernetes.LoadValidatingAdmissionPolicyBindingsWithProgress(bindingFile, func(string) {
 				tracker.Increment(1)
 			})
 			return err
@@ -396,13 +389,13 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		}
 	default:
 		err = withProgress("Fetching remote policies", 2, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
+			policies, err = kubernetes.ListValidatingAdmissionPolicies()
 			if err != nil {
 				return err
 			}
 			tracker.Increment(1)
 
-			bindings, err = kubernetes.GetRemoteValidatingAdmissionPolicyBindings()
+			bindings, err = kubernetes.ListValidatingAdmissionPolicyBindings()
 			if err != nil {
 				return err
 			}
@@ -415,7 +408,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	}
 
 	if ignoreBindings && len(bindings) == 0 {
-		bindings = implicitBindingsForPolicies(vaps)
+		bindings = implicitBindingsForPolicies(policies)
 	}
 
 	var resources []map[string]interface{}
@@ -435,9 +428,9 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		if allNamespaces {
 			scope = kubernetes.ResourceScopeAllNamespaces
 		}
-		total := maxInt64(int64(len(vaps)), 1)
+		total := maxInt64(int64(len(policies)), 1)
 		err = withProgress("Fetching remote resources", total, progressEnabled, func(tracker *progress.Tracker) error {
-			remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, scope, namespaces, func() {
+			remoteRes, remoteNS, err := kubernetes.ListResourcesForPoliciesWithProgress(policies, scope, namespaces, func() {
 				tracker.Increment(1)
 			})
 			if err != nil {
@@ -457,7 +450,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("no resources available for validation")
 	}
 
-	normalizeResourcesForCEL(resources)
+	kubernetes.NormalizeResourcesForCEL(resources)
 
 	collectNamespace := viewHasNamespace
 	collectResource := viewHasResource
@@ -479,7 +472,7 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 		if bundleName == "pod-security-admission" {
 			psaLevelForEval = psaLevel
 		}
-		reports, nsReports, resReports, failures, err := evaluatePolicyReports(vaps, bindings, resources, namespaceLabels, ignoreBindings, collectNamespace, collectResource, psaLevelForEval, progressEnabled)
+		reports, nsReports, resReports, failures, err := evaluatePolicyReports(policies, bindings, resources, namespaceLabels, ignoreBindings, collectNamespace, collectResource, psaLevelForEval, progressEnabled)
 		if err != nil {
 			return err
 		}
@@ -490,43 +483,43 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 	}
 
 	if viewHasPolicy {
-		if format == "json" {
+		if outputFormat == "json" {
 			stopTime := time.Now()
-			metadata := buildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
+			metadata := format.BuildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
 			payload := buildPolicyJSONReport(reportMode, policyReports, resourceTotals, resourceDetails)
-			if err := writeJSONEnvelope(writer, metadata, payload); err != nil {
+			if err := format.WriteJSONEnvelope(writer, metadata, payload); err != nil {
 				return err
 			}
 		} else {
-			if err := renderReport(reportMode, format, policyReports, resourceTotals, resourceDetails, writer, tableStyle, useColor); err != nil {
+			if err := renderReport(reportMode, outputFormat, policyReports, resourceTotals, resourceDetails, writer, tableStyle, useColor); err != nil {
 				return err
 			}
 		}
 	}
 	if viewHasNamespace {
-		if format == "json" {
+		if outputFormat == "json" {
 			stopTime := time.Now()
-			metadata := buildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
+			metadata := format.BuildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
 			payload := buildNamespaceJSONReport(reportMode, namespaceReport, resourceTotals)
-			if err := writeJSONEnvelope(writer, metadata, payload); err != nil {
+			if err := format.WriteJSONEnvelope(writer, metadata, payload); err != nil {
 				return err
 			}
 		} else {
-			if err := renderNamespaceReport(reportMode, format, namespaceReport, resourceTotals, writer, tableStyle, useColor); err != nil {
+			if err := renderNamespaceReport(reportMode, outputFormat, namespaceReport, resourceTotals, writer, tableStyle, useColor); err != nil {
 				return err
 			}
 		}
 	}
 	if viewHasResource {
-		if format == "json" {
+		if outputFormat == "json" {
 			stopTime := time.Now()
-			metadata := buildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
+			metadata := format.BuildJSONMetadata(cmd, view, namespacesFromResources(resources), resourceTotals, startTime, stopTime)
 			payload := buildResourceJSONReport(reportMode, resourceReport)
-			if err := writeJSONEnvelope(writer, metadata, payload); err != nil {
+			if err := format.WriteJSONEnvelope(writer, metadata, payload); err != nil {
 				return err
 			}
 		} else {
-			if err := renderResourceReport(reportMode, format, resourceReport, writer, tableStyle, useColor); err != nil {
+			if err := renderResourceReport(reportMode, outputFormat, resourceReport, writer, tableStyle, useColor); err != nil {
 				return err
 			}
 		}
@@ -537,8 +530,8 @@ func runValidateVAP(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("validation failures detected")
 		}
 		if viewHasNamespace {
-			for _, ns := range namespaceReport {
-				if ns.NonCompliant > 0 {
+			for _, namespaceEntry := range namespaceReport {
+				if namespaceEntry.NonCompliant > 0 {
 					return fmt.Errorf("validation failures detected")
 				}
 			}
@@ -612,7 +605,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 		matched := false
 		var mu sync.Mutex
 		ctx, cancel := context.WithCancel(context.Background())
-		workers := workerLimit(len(resources))
+		workers := worker.WorkerLimit(len(resources))
 		tasks := make(chan map[string]interface{}, workers*2)
 		errCh := make(chan error, 1)
 		var wg sync.WaitGroup
@@ -629,24 +622,24 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 							return
 						}
 						progressCh <- struct{}{}
-						nsName := kubernetes.GetMetadataString(resource, "namespace")
-						nsLabels, nsKnown := namespaceLabels[nsName]
+						namespaceName := kubernetes.MetadataString(resource, "namespace")
+						namespaceLabelValues, namespaceKnown := namespaceLabels[namespaceName]
 						if psaLevel != "" {
-							nsLabels = applyPSALevelLabels(nsLabels, psaLevel)
-							nsKnown = true
+							namespaceLabelValues = kubernetes.ApplyPSALevelLabels(namespaceLabelValues, psaLevel)
+							namespaceKnown = true
 						}
-						if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
+						if !kubernetes.MatchesPolicy(policy, resource, namespaceLabelValues, namespaceKnown, false) {
 							continue
 						}
 						if !ignoreBindings {
-							if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, false, false) {
+							if !kubernetes.MatchesBinding(binding, resource, namespaceLabelValues, namespaceKnown, false, false) {
 								continue
 							}
 						}
-						resName := describeResource(resource)
-						resKind, resDisplay := resourceDisplayName(resource)
-						logging.Debugf("  Matched %s", resName)
-						result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
+						resourceName := describeResource(resource)
+						resourceKindName, resourceDisplayName := resourceDisplayName(resource)
+						logging.Debugf("  Matched %s", resourceName)
+						result, err := kubernetes.EvaluateValidations(policy, binding, resource, namespaceName, namespaceLabelValues)
 						if err != nil {
 							select {
 							case errCh <- err:
@@ -655,7 +648,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 							cancel()
 							return
 						}
-						resID := resourceIdentifier(resource)
+						resourceKeyValue := resourceKey(resource)
 						if result.Compliant {
 							mu.Lock()
 							matched = true
@@ -663,7 +656,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 							bReport.Compliant++
 							mu.Unlock()
 							if storeResourceDetails {
-								updateResourceStatus(resourceStatus, resourceNamespace, resourceViolations, resourceDisplay, resourceKind, resID, resDisplay, resKind, nsName, true, nil, &resMu)
+								updateResourceStatus(resourceStatus, resourceNamespace, resourceViolations, resourceDisplay, resourceKind, resourceKeyValue, resourceDisplayName, resourceKindName, namespaceName, true, nil, &resMu)
 							}
 							continue
 						}
@@ -672,7 +665,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 							violations[i] = violationDetail{
 								Policy:   policy.Name,
 								Binding:  binding.Name,
-								Resource: resName,
+								Resource: resourceName,
 								Message:  violation.Message,
 								Path:     violation.Path,
 								Actions:  violation.Actions,
@@ -685,7 +678,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 						bReport.Violations = append(bReport.Violations, violations...)
 						mu.Unlock()
 						if storeResourceDetails {
-							updateResourceStatus(resourceStatus, resourceNamespace, resourceViolations, resourceDisplay, resourceKind, resID, resDisplay, resKind, nsName, false, violations, &resMu)
+							updateResourceStatus(resourceStatus, resourceNamespace, resourceViolations, resourceDisplay, resourceKind, resourceKeyValue, resourceDisplayName, resourceKindName, namespaceName, false, violations, &resMu)
 						}
 					}
 				}
@@ -724,14 +717,14 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 	if collectNamespace {
 		namespaceMap := make(map[string]*namespaceReport)
 		for id, status := range resourceStatus {
-			ns := resourceNamespace[id]
-			if ns == "" {
-				ns = "<cluster>"
+			namespaceName := resourceNamespace[id]
+			if namespaceName == "" {
+				namespaceName = "<cluster>"
 			}
-			report, ok := namespaceMap[ns]
+			report, ok := namespaceMap[namespaceName]
 			if !ok {
-				report = &namespaceReport{Namespace: ns}
-				namespaceMap[ns] = report
+				report = &namespaceReport{Namespace: namespaceName}
+				namespaceMap[namespaceName] = report
 			}
 			report.Total++
 			if status {
@@ -743,21 +736,21 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 				}
 			}
 		}
-		for _, res := range resources {
-			ns := kubernetes.GetMetadataString(res, "namespace")
-			if ns == "" {
+		for _, resource := range resources {
+			namespaceName := kubernetes.MetadataString(resource, "namespace")
+			if namespaceName == "" {
 				continue
 			}
-			if _, ok := namespaceMap[ns]; !ok {
-				namespaceMap[ns] = &namespaceReport{Namespace: ns}
+			if _, ok := namespaceMap[namespaceName]; !ok {
+				namespaceMap[namespaceName] = &namespaceReport{Namespace: namespaceName}
 			}
 		}
-		for ns := range namespaceLabels {
-			if ns == "" {
+		for namespaceName := range namespaceLabels {
+			if namespaceName == "" {
 				continue
 			}
-			if _, ok := namespaceMap[ns]; !ok {
-				namespaceMap[ns] = &namespaceReport{Namespace: ns}
+			if _, ok := namespaceMap[namespaceName]; !ok {
+				namespaceMap[namespaceName] = &namespaceReport{Namespace: namespaceName}
 			}
 		}
 		for _, report := range namespaceMap {
@@ -768,18 +761,19 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 		})
 	}
 	if collectResource {
-		for id, violations := range resourceViolations {
+		for resourceKey := range resourceViolations {
+			violations := resourceViolations[resourceKey]
 			if len(violations) == 0 {
 				continue
 			}
-			name := resourceDisplay[id]
-			if name == "" {
-				name = id
+			resourceName := resourceDisplay[resourceKey]
+			if resourceName == "" {
+				resourceName = resourceKey
 			}
-			kind := resourceKind[id]
+			resourceKindName := resourceKind[resourceKey]
 			resourceReports = append(resourceReports, resourceReport{
-				Kind:            kind,
-				Resource:        name,
+				Kind:            resourceKindName,
+				Resource:        resourceName,
 				TotalViolations: len(violations),
 				Violations:      violations,
 			})
@@ -937,81 +931,20 @@ func buildNamespaceLabelIndex(resources []map[string]interface{}) map[string]map
 	for _, obj := range resources {
 		kind, _ := obj["kind"].(string)
 		if strings.EqualFold(kind, "Namespace") {
-			name := kubernetes.GetMetadataString(obj, "name")
+			name := kubernetes.MetadataString(obj, "name")
 			if name == "" {
 				continue
 			}
-			index[name] = kubernetes.GetMetadataLabels(obj)
+			index[name] = kubernetes.MetadataLabels(obj)
 		}
 	}
 	return index
 }
 
-func normalizeResourcesForCEL(resources []map[string]interface{}) {
-	for _, obj := range resources {
-		normalizeResourceForCEL(obj)
-	}
-}
-
-func normalizeResourceForCEL(obj map[string]interface{}) {
-	if obj == nil {
-		return
-	}
-	kind, _ := obj["kind"].(string)
-	switch strings.ToLower(kind) {
-	case "role", "clusterrole":
-		normalizeRBACRules(obj)
-	}
-}
-
-func normalizeRBACRules(obj map[string]interface{}) {
-	rulesRaw, ok := obj["rules"]
-	if !ok {
-		return
-	}
-	if rulesRaw == nil {
-		obj["rules"] = []interface{}{}
-		return
-	}
-	rules, ok := rulesRaw.([]interface{})
-	if !ok {
-		return
-	}
-	for _, ruleRaw := range rules {
-		rule, ok := ruleRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		normalizeListField(rule, "apiGroups")
-		normalizeListField(rule, "resources")
-		normalizeListField(rule, "verbs")
-		normalizeListField(rule, "resourceNames")
-		normalizeListField(rule, "nonResourceURLs")
-	}
-}
-
-func normalizeListField(rule map[string]interface{}, key string) {
-	val, ok := rule[key]
-	if !ok || val == nil {
-		rule[key] = []interface{}{}
-		return
-	}
-	switch v := val.(type) {
-	case []interface{}:
-		return
-	case []string:
-		out := make([]interface{}, 0, len(v))
-		for _, item := range v {
-			out = append(out, item)
-		}
-		rule[key] = out
-	}
-}
-
 func describeResource(obj map[string]interface{}) string {
 	kind, _ := obj["kind"].(string)
-	name := kubernetes.GetMetadataString(obj, "name")
-	namespace := kubernetes.GetMetadataString(obj, "namespace")
+	name := kubernetes.MetadataString(obj, "name")
+	namespace := kubernetes.MetadataString(obj, "namespace")
 	if namespace == "" {
 		namespace = "<cluster>"
 	}
@@ -1020,99 +953,12 @@ func describeResource(obj map[string]interface{}) string {
 
 func resourceDisplayName(obj map[string]interface{}) (string, string) {
 	kind, _ := obj["kind"].(string)
-	name := kubernetes.GetMetadataString(obj, "name")
-	namespace := kubernetes.GetMetadataString(obj, "namespace")
+	name := kubernetes.MetadataString(obj, "name")
+	namespace := kubernetes.MetadataString(obj, "namespace")
 	if namespace == "" {
 		return kind, name
 	}
 	return kind, fmt.Sprintf("%s/%s", namespace, name)
-}
-
-func evaluateValidations(policy *admissionregistrationv1.ValidatingAdmissionPolicy, binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding, resource map[string]interface{}, namespace string, namespaceLabels map[string]string) (validationResult, error) {
-	resultData := validationResult{Compliant: true}
-	normalizeResourceForCEL(resource)
-
-	payload := map[string]interface{}{
-		"object":          resource,
-		"oldObject":       nil,
-		"request":         nil,
-		"params":          nil,
-		"namespaceObject": buildNamespaceObject(namespace, namespaceLabels),
-		"variables":       map[string]interface{}{},
-		"resource":        resource,
-	}
-	varScope := payload["variables"].(map[string]interface{})
-
-	for _, variable := range policy.Spec.Variables {
-		val, err := cel.Evaluate(variable.Expression, payload)
-		if err != nil {
-			return resultData, fmt.Errorf("variable %s evaluation failed for policy %s: %w", variable.Name, policy.Name, err)
-		}
-		varScope[variable.Name] = val
-	}
-
-	if len(policy.Spec.Validations) == 0 {
-		logging.Debugf("    Policy %s defines no validations", policy.Name)
-		return resultData, nil
-	}
-
-	for idx, validation := range policy.Spec.Validations {
-		ok, err := cel.Check(validation.Expression, payload)
-		if err != nil {
-			return resultData, fmt.Errorf("cel evaluation failed for policy %s binding %s validation %d: %w", policy.Name, binding.Name, idx, err)
-		}
-
-		message := validation.Message
-		if message == "" {
-			message = validation.Expression
-		}
-
-		if ok {
-			logging.Debugf("    Validation[%d] PASSED (%s)", idx, message)
-			continue
-		}
-
-		resultData.Compliant = false
-		actions := binding.Spec.ValidationActions
-		if len(actions) == 0 {
-			actions = []admissionregistrationv1.ValidationAction{admissionregistrationv1.Deny}
-		}
-		actionStrings := actionsToStrings(actions)
-		resultData.Violations = append(resultData.Violations, violationRecord{
-			Message: message,
-			Actions: actionStrings,
-		})
-
-		// No realtime logging here; reporting handles output later.
-	}
-
-	return resultData, nil
-}
-
-func buildNamespaceObject(name string, labels map[string]string) map[string]interface{} {
-	if name == "" {
-		return nil
-	}
-	meta := map[string]interface{}{
-		"name": name,
-	}
-	if len(labels) > 0 {
-		meta["labels"] = convertStringMap(labels)
-	}
-	return map[string]interface{}{
-		"metadata": meta,
-	}
-}
-
-func convertStringMap(values map[string]string) map[string]interface{} {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make(map[string]interface{}, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
-	return out
 }
 
 func actionsToStrings(actions []admissionregistrationv1.ValidationAction) []string {
@@ -1159,11 +1005,11 @@ func withProgress(message string, total int64, enabled bool, fn func(*progress.T
 	return fn(tracker)
 }
 
-func resourceIdentifier(obj map[string]interface{}) string {
+func resourceKey(obj map[string]interface{}) string {
 	kind, _ := obj["kind"].(string)
-	namespace := kubernetes.GetMetadataString(obj, "namespace")
-	name := kubernetes.GetMetadataString(obj, "name")
-	uid := kubernetes.GetMetadataString(obj, "uid")
+	namespace := kubernetes.MetadataString(obj, "namespace")
+	name := kubernetes.MetadataString(obj, "name")
+	uid := kubernetes.MetadataString(obj, "uid")
 	return fmt.Sprintf("%s/%s/%s/%s", kind, namespace, name, uid)
 }
 
@@ -1211,22 +1057,22 @@ func mergeFilteredNamespaceLabels(dest, src map[string]map[string]string, namesp
 	useFilter := !includeAll && len(namespaces) > 0
 	allowed := make(map[string]struct{})
 	if useFilter {
-		for _, ns := range namespaces {
-			allowed[ns] = struct{}{}
+		for _, namespaceName := range namespaces {
+			allowed[namespaceName] = struct{}{}
 		}
 	}
-	for ns, labels := range src {
+	for namespaceName, labels := range src {
 		if useFilter {
-			if _, ok := allowed[ns]; !ok {
+			if _, ok := allowed[namespaceName]; !ok {
 				continue
 			}
 		}
-		dest[ns] = convertPSANamespaceLabels(labels)
+		dest[namespaceName] = convertPSANamespaceLabels(labels)
 	}
 	if useFilter {
-		for ns := range dest {
-			if _, ok := allowed[ns]; !ok {
-				delete(dest, ns)
+		for namespaceName := range dest {
+			if _, ok := allowed[namespaceName]; !ok {
+				delete(dest, namespaceName)
 			}
 		}
 	}
@@ -1238,20 +1084,20 @@ func filterResourcesByNamespaces(resources []map[string]interface{}, namespaces 
 		return resources
 	}
 	allowed := make(map[string]struct{})
-	for _, ns := range namespaces {
-		if ns != "" {
-			allowed[ns] = struct{}{}
+	for _, namespaceName := range namespaces {
+		if namespaceName != "" {
+			allowed[namespaceName] = struct{}{}
 		}
 	}
 	var filtered []map[string]interface{}
-	for _, res := range resources {
-		ns := kubernetes.GetMetadataString(res, "namespace")
-		if ns == "" {
-			filtered = append(filtered, res)
+	for _, resource := range resources {
+		namespaceName := kubernetes.MetadataString(resource, "namespace")
+		if namespaceName == "" {
+			filtered = append(filtered, resource)
 			continue
 		}
-		if _, ok := allowed[ns]; ok {
-			filtered = append(filtered, res)
+		if _, ok := allowed[namespaceName]; ok {
+			filtered = append(filtered, resource)
 		}
 	}
 	return filtered
@@ -1277,24 +1123,24 @@ func namespacesFromSelector(selector string) ([]string, error) {
 	if selector == "" {
 		return nil, nil
 	}
-	clientset, err := kubernetes.Init()
+	clientset, err := kubernetes.NewClientset()
 	if err != nil {
 		return nil, err
 	}
-	nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{
+	namespaceList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{
 		LabelSelector: selector,
 	})
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(nsList.Items))
-	for _, ns := range nsList.Items {
-		if ns.Name != "" {
-			names = append(names, ns.Name)
+	namespaceNames := make([]string, 0, len(namespaceList.Items))
+	for _, namespace := range namespaceList.Items {
+		if namespace.Name != "" {
+			namespaceNames = append(namespaceNames, namespace.Name)
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Strings(namespaceNames)
+	return namespaceNames, nil
 }
 
 func extractPodsFromResources(resources []map[string]interface{}) ([]corev1.Pod, error) {
@@ -1324,7 +1170,7 @@ func countResourcesByKind(resources []map[string]interface{}) map[string]int {
 	totals := make(map[string]int)
 	seen := make(map[string]struct{})
 	for _, res := range resources {
-		id := resourceIdentifier(res)
+		id := resourceKey(res)
 		if _, ok := seen[id]; ok {
 			continue
 		}
@@ -1341,18 +1187,18 @@ func namespacesFromResources(resources []map[string]interface{}) []string {
 		return nil
 	}
 	namespaces := make([]string, 0, len(resources))
-	for _, res := range resources {
-		ns := kubernetes.GetMetadataString(res, "namespace")
-		if ns == "" {
+	for _, resource := range resources {
+		namespaceName := kubernetes.MetadataString(resource, "namespace")
+		if namespaceName == "" {
 			continue
 		}
-		namespaces = append(namespaces, ns)
+		namespaces = append(namespaces, namespaceName)
 	}
-	return uniqueSortedStrings(namespaces)
+	return format.UniqueSortedStrings(namespaces)
 }
 
-func renderReport(reportMode, format string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail, w io.Writer, style table.Style, useColor bool) error {
-	switch format {
+func renderReport(reportMode, outputFormat string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail, w io.Writer, style table.Style, useColor bool) error {
+	switch outputFormat {
 	case "json":
 		return renderJSONReport(reportMode, reports, resourceTotals, resourceDetails, w)
 	case "table":
@@ -1362,7 +1208,7 @@ func renderReport(reportMode, format string, reports []*bindingReport, resourceT
 			printViolationLogs(reports, w, useColor)
 		}
 	default:
-		return fmt.Errorf("unsupported format %s", format)
+		return fmt.Errorf("unsupported format %s", outputFormat)
 	}
 	return nil
 }
@@ -1429,8 +1275,8 @@ func buildNamespaceJSONReport(reportMode string, reports []namespaceReport, reso
 	return payload
 }
 
-func renderNamespaceReport(reportMode, format string, reports []namespaceReport, resourceTotals map[string]int, w io.Writer, style table.Style, useColor bool) error {
-	switch format {
+func renderNamespaceReport(reportMode, outputFormat string, reports []namespaceReport, resourceTotals map[string]int, w io.Writer, style table.Style, useColor bool) error {
+	switch outputFormat {
 	case "json":
 		payload := buildNamespaceJSONReport(reportMode, reports, resourceTotals)
 		encoded, err := json.MarshalIndent(payload, "", "  ")
@@ -1445,13 +1291,13 @@ func renderNamespaceReport(reportMode, format string, reports []namespaceReport,
 			printNamespaceViolationLogs(reports, w, useColor)
 		}
 	default:
-		return fmt.Errorf("unsupported format %s", format)
+		return fmt.Errorf("unsupported format %s", outputFormat)
 	}
 	return nil
 }
 
-func renderResourceReport(reportMode, format string, reports []resourceReport, w io.Writer, style table.Style, useColor bool) error {
-	switch format {
+func renderResourceReport(reportMode, outputFormat string, reports []resourceReport, w io.Writer, style table.Style, useColor bool) error {
+	switch outputFormat {
 	case "json":
 		payload := buildResourceJSONReport(reportMode, reports)
 		encoded, err := json.MarshalIndent(payload, "", "  ")
@@ -1462,7 +1308,7 @@ func renderResourceReport(reportMode, format string, reports []resourceReport, w
 	case "table":
 		printResourceViolationTable(reportMode, reports, w, style, useColor)
 	default:
-		return fmt.Errorf("unsupported format %s", format)
+		return fmt.Errorf("unsupported format %s", outputFormat)
 	}
 	return nil
 }
@@ -1711,7 +1557,7 @@ func collectResourceDetails(resources []map[string]interface{}) []resourceDetail
 	seen := make(map[string]struct{})
 	var details []resourceDetail
 	for _, res := range resources {
-		id := resourceIdentifier(res)
+		id := resourceKey(res)
 		if _, ok := seen[id]; ok {
 			continue
 		}
@@ -1719,8 +1565,8 @@ func collectResourceDetails(resources []map[string]interface{}) []resourceDetail
 		kind, _ := res["kind"].(string)
 		details = append(details, resourceDetail{
 			Kind:      kind,
-			Namespace: kubernetes.GetMetadataString(res, "namespace"),
-			Name:      kubernetes.GetMetadataString(res, "name"),
+			Namespace: kubernetes.MetadataString(res, "namespace"),
+			Name:      kubernetes.MetadataString(res, "name"),
 		})
 	}
 	sort.Slice(details, func(i, j int) bool {
@@ -1806,25 +1652,25 @@ type psaNamespaceResult struct {
 	Violations   []violationDetail `json:"violations,omitempty"`
 }
 
-func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string]string, namespaces []string, all bool, compliance map[string]psaComplianceCounts) ([]psaNamespaceResult, bool) {
+func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string]string, namespaces []string, all bool, compliance map[string]kubernetes.PSAComplianceCounts) ([]psaNamespaceResult, bool) {
 	results := make(map[string]*psaNamespaceResult)
-	usesKolteq := namespaceLabelsUseKolteq(namespaceLabels)
-	target := make(map[string]struct{})
-	for _, ns := range namespaces {
-		if ns != "" {
-			target[ns] = struct{}{}
+	usesKolteqLabels := namespaceLabelsContainKolteq(namespaceLabels)
+	targetNamespaces := make(map[string]struct{})
+	for _, namespaceName := range namespaces {
+		if namespaceName != "" {
+			targetNamespaces[namespaceName] = struct{}{}
 		}
 	}
-	includeNamespace := func(ns string) bool {
-		if all || len(target) == 0 {
+	includeNamespace := func(namespaceName string) bool {
+		if all || len(targetNamespaces) == 0 {
 			return true
 		}
-		_, ok := target[ns]
+		_, ok := targetNamespaces[namespaceName]
 		return ok
 	}
 
-	addNamespace := func(ns string, labels map[string]string) *psaNamespaceResult {
-		if res, ok := results[ns]; ok {
+	addNamespace := func(namespaceName string, labels map[string]string) *psaNamespaceResult {
+		if res, ok := results[namespaceName]; ok {
 			return res
 		}
 		labels = convertPSANamespaceLabels(labels)
@@ -1832,59 +1678,59 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 		for _, mode := range []string{"enforce", "audit", "warn"} {
 			if _, ok := labels["pss.security.kolteq.com/"+mode]; ok {
 				kolteqModes[mode] = true
-				usesKolteq = true
+				usesKolteqLabels = true
 				continue
 			}
 		}
 		res := &psaNamespaceResult{
-			Namespace: ns,
+			Namespace: namespaceName,
 			Modes:     convertPSALabels(labels),
 			Kolteq:    kolteqModes,
 		}
-		results[ns] = res
+		results[namespaceName] = res
 		return res
 	}
 
 	for _, pod := range pods {
-		ns := pod.Namespace
-		if ns == "" {
-			ns = kubernetes.ActiveNamespace()
+		namespaceName := pod.Namespace
+		if namespaceName == "" {
+			namespaceName = kubernetes.ActiveNamespace()
 		}
-		if ns == "" {
-			ns = "default"
+		if namespaceName == "" {
+			namespaceName = "default"
 		}
-		if !includeNamespace(ns) {
+		if !includeNamespace(namespaceName) {
 			continue
 		}
-		nsLabels := namespaceLabels[ns]
-		nsResult := addNamespace(ns, nsLabels)
-		nsResult.Pods++
+		namespaceLabelValues := namespaceLabels[namespaceName]
+		namespaceResult := addNamespace(namespaceName, namespaceLabelValues)
+		namespaceResult.Pods++
 	}
 
-	for ns, labels := range namespaceLabels {
-		if !includeNamespace(ns) {
+	for namespaceName, labels := range namespaceLabels {
+		if !includeNamespace(namespaceName) {
 			continue
 		}
-		addNamespace(ns, labels)
+		addNamespace(namespaceName, labels)
 	}
 
-	for _, ns := range namespaces {
-		if ns == "" {
+	for _, namespaceName := range namespaces {
+		if namespaceName == "" {
 			continue
 		}
-		if _, ok := results[ns]; !ok && includeNamespace(ns) {
-			addNamespace(ns, nil)
+		if _, ok := results[namespaceName]; !ok && includeNamespace(namespaceName) {
+			addNamespace(namespaceName, nil)
 		}
 	}
 
-	for ns, counts := range compliance {
-		if !includeNamespace(ns) {
+	for namespaceName, counts := range compliance {
+		if !includeNamespace(namespaceName) {
 			continue
 		}
-		res := addNamespace(ns, namespaceLabels[ns])
+		res := addNamespace(namespaceName, namespaceLabels[namespaceName])
 		res.Compliant = counts.Compliant
 		res.NonCompliant = counts.NonCompliant
-		res.Violations = counts.Violations
+		res.Violations = convertPSAViolations(counts.Violations)
 	}
 
 	var sorted []psaNamespaceResult
@@ -1895,22 +1741,40 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 		return sorted[i].Namespace < sorted[j].Namespace
 	})
 
-	return sorted, usesKolteq
+	return sorted, usesKolteqLabels
 }
 
-func printPSATable(results []psaNamespaceResult, kolteq bool, w io.Writer, style table.Style) {
+func convertPSAViolations(violations []kubernetes.PSAViolation) []violationDetail {
+	if len(violations) == 0 {
+		return nil
+	}
+	out := make([]violationDetail, len(violations))
+	for i, violation := range violations {
+		out[i] = violationDetail{
+			Policy:   violation.Policy,
+			Binding:  violation.Binding,
+			Resource: violation.Resource,
+			Message:  violation.Message,
+			Path:     violation.Path,
+			Actions:  violation.Actions,
+		}
+	}
+	return out
+}
+
+func printPSATable(results []psaNamespaceResult, useKolteqLabels bool, w io.Writer, style table.Style) {
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
 	t.SetTitle("PSA Namespace Levels")
-	t.AppendHeader(table.Row{"Namespace", "Enforce", "Audit", "Warn", "Compliant", "Incompliant"})
+	t.AppendHeader(table.Row{"Namespace", "Enforce", "Audit", "Warn", "Compliant", "Non-compliant"})
 	var totalCompliant, totalNonCompliant int
 	for _, res := range results {
 		t.AppendRow(table.Row{
 			res.Namespace,
-			formatPSAMode(res.Modes, res.Kolteq, "enforce", kolteq),
-			formatPSAMode(res.Modes, res.Kolteq, "audit", kolteq),
-			formatPSAMode(res.Modes, res.Kolteq, "warn", kolteq),
+			formatPSAMode(res.Modes, res.Kolteq, "enforce", useKolteqLabels),
+			formatPSAMode(res.Modes, res.Kolteq, "audit", useKolteqLabels),
+			formatPSAMode(res.Modes, res.Kolteq, "warn", useKolteqLabels),
 			res.Compliant,
 			res.NonCompliant,
 		})
@@ -1925,7 +1789,7 @@ func printPSATable(results []psaNamespaceResult, kolteq bool, w io.Writer, style
 	t.Render()
 }
 
-func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode string, kolteq bool) string {
+func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode string, useKolteqLabels bool) string {
 	if modes == nil {
 		return "-"
 	}
@@ -1933,7 +1797,7 @@ func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode st
 	if label == "" {
 		return "-"
 	}
-	if kolteq && kolteqModes != nil && kolteqModes[mode] {
+	if useKolteqLabels && kolteqModes != nil && kolteqModes[mode] {
 		return label + " (KolTEQ)"
 	}
 	return label
@@ -1965,7 +1829,7 @@ func convertPSALabels(labels map[string]string) map[string]string {
 	return result
 }
 
-func namespaceLabelsUseKolteq(labels map[string]map[string]string) bool {
+func namespaceLabelsContainKolteq(labels map[string]map[string]string) bool {
 	for _, nsLabels := range labels {
 		for k := range nsLabels {
 			if strings.Contains(k, "pss.security.kolteq.com/") {

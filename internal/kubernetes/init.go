@@ -31,7 +31,7 @@ func ActiveNamespace() string {
 	return activeNamespace
 }
 
-func Config() (*rest.Config, error) {
+func RESTConfig() (*rest.Config, error) {
 	warningsOnce.Do(func() {
 		rest.SetDefaultWarningHandler(rest.NoWarnings{})
 	})
@@ -70,8 +70,8 @@ func Config() (*rest.Config, error) {
 	return config, nil
 }
 
-func Init() (*kubernetes.Clientset, error) {
-	config, err := Config()
+func NewClientset() (*kubernetes.Clientset, error) {
+	config, err := RESTConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -91,9 +91,9 @@ func detectNamespace(path string) string {
 	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
 	configOverrides := &clientcmd.ConfigOverrides{}
 	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-	ns, _, err := clientConfig.Namespace()
-	if err == nil && ns != "" {
-		return ns
+	namespaceName, _, err := clientConfig.Namespace()
+	if err == nil && namespaceName != "" {
+		return namespaceName
 	}
 	return "default"
 }
@@ -101,8 +101,8 @@ func detectNamespace(path string) string {
 func detectInClusterNamespace() string {
 	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	if err == nil {
-		if ns := strings.TrimSpace(string(data)); ns != "" {
-			return ns
+		if namespaceName := strings.TrimSpace(string(data)); namespaceName != "" {
+			return namespaceName
 		}
 	}
 	if kubeconfigPath != "" {

@@ -1,7 +1,7 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package format
 
 import (
 	"encoding/json"
@@ -17,30 +17,30 @@ import (
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 )
 
-type jsonEnvelope struct {
-	Metadata jsonMetadata `json:"metadata"`
-	Results  interface{} `json:"results"`
+type JSONEnvelope struct {
+	Metadata JSONMetadata `json:"metadata"`
+	Results  interface{}  `json:"results"`
 }
 
-type jsonMetadata struct {
-	Command    string           `json:"comand"`
-	View       string           `json:"view"`
-	Kubernetes jsonKubernetes    `json:"kubernetes"`
-	Time       jsonTimeWindow    `json:"time"`
+type JSONMetadata struct {
+	Command    string         `json:"command"`
+	View       string         `json:"view"`
+	Kubernetes JSONKubernetes `json:"kubernetes"`
+	Time       JSONTimeWindow `json:"time"`
 }
 
-type jsonKubernetes struct {
+type JSONKubernetes struct {
 	Name       string         `json:"name"`
 	Namespaces []string       `json:"namespaces"`
 	Resources  map[string]int `json:"resources"`
 }
 
-type jsonTimeWindow struct {
+type JSONTimeWindow struct {
 	Start int64 `json:"start"`
 	Stop  int64 `json:"stop"`
 }
 
-func buildJSONMetadata(cmd *cobra.Command, view string, namespaces []string, resources map[string]int, start, stop time.Time) jsonMetadata {
+func BuildJSONMetadata(cmd *cobra.Command, view string, namespaces []string, resources map[string]int, start, stop time.Time) JSONMetadata {
 	command := strings.Join(os.Args, " ")
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -52,7 +52,7 @@ func buildJSONMetadata(cmd *cobra.Command, view string, namespaces []string, res
 		name = "unknown"
 	}
 
-	metadataNamespaces := uniqueSortedStrings(namespaces)
+	metadataNamespaces := UniqueSortedStrings(namespaces)
 	if metadataNamespaces == nil {
 		metadataNamespaces = []string{}
 	}
@@ -61,23 +61,23 @@ func buildJSONMetadata(cmd *cobra.Command, view string, namespaces []string, res
 		resources = map[string]int{}
 	}
 
-	return jsonMetadata{
+	return JSONMetadata{
 		Command: command,
 		View:    jsonViewLabel(view),
-		Kubernetes: jsonKubernetes{
+		Kubernetes: JSONKubernetes{
 			Name:       name,
 			Namespaces: metadataNamespaces,
 			Resources:  resources,
 		},
-		Time: jsonTimeWindow{
+		Time: JSONTimeWindow{
 			Start: start.Unix(),
 			Stop:  stop.Unix(),
 		},
 	}
 }
 
-func writeJSONEnvelope(w io.Writer, metadata jsonMetadata, results interface{}) error {
-	payload := jsonEnvelope{
+func WriteJSONEnvelope(w io.Writer, metadata JSONMetadata, results interface{}) error {
+	payload := JSONEnvelope{
 		Metadata: metadata,
 		Results:  results,
 	}
@@ -103,7 +103,7 @@ func jsonViewLabel(view string) string {
 	}
 }
 
-func uniqueSortedStrings(values []string) []string {
+func UniqueSortedStrings(values []string) []string {
 	if len(values) == 0 {
 		return nil
 	}

@@ -1,7 +1,7 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -25,14 +25,14 @@ import (
 )
 
 const (
-	policiesIndexURL  = "https://raw.githubusercontent.com/kolteq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
-	policiesArchive   = "policies.tar.gz"
-	policyAnnName     = "security.kubeapt.io/displayName"
-	policyAnnDesc     = "security.kubeapt.io/description"
-	policyAnnResource = "security.kubeapt.io/resource"
-	policyAnnSeverity = "security.kubeapt.io/severity"
-	policyAnnFix      = "security.kubeapt.io/remediation"
-	policyAnnProduct  = "security.kubeapt.io/product"
+	policiesIndexURL            = "https://raw.githubusercontent.com/kolteq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
+	policiesArchive             = "policies.tar.gz"
+	policyAnnotationDisplayName = "security.kubeapt.io/displayName"
+	policyAnnotationDescription = "security.kubeapt.io/description"
+	policyAnnotationResource    = "security.kubeapt.io/resource"
+	policyAnnotationSeverity    = "security.kubeapt.io/severity"
+	policyAnnotationRemediation = "security.kubeapt.io/remediation"
+	policyAnnotationProduct     = "security.kubeapt.io/product"
 )
 
 type policiesIndex struct {
@@ -327,7 +327,7 @@ func runPolicyInstall(cmd *cobra.Command, policyName, version string, overwrite,
 	}
 
 	if !overwrite {
-		existing, err := kubernetes.GetRemoteValidatingAdmissionPolicies()
+		existing, err := kubernetes.ListValidatingAdmissionPolicies()
 		if err != nil {
 			return err
 		}
@@ -727,12 +727,12 @@ func policyAnnotationsFrom(policy admissionregistrationv1.ValidatingAdmissionPol
 	if meta == nil {
 		return annotations
 	}
-	annotations.DisplayName = strings.TrimSpace(meta[policyAnnName])
-	annotations.Description = strings.TrimSpace(meta[policyAnnDesc])
-	annotations.Resource = strings.TrimSpace(meta[policyAnnResource])
-	annotations.Severity = strings.TrimSpace(meta[policyAnnSeverity])
-	annotations.Remediation = strings.TrimSpace(meta[policyAnnFix])
-	annotations.Product = strings.TrimSpace(meta[policyAnnProduct])
+	annotations.DisplayName = strings.TrimSpace(meta[policyAnnotationDisplayName])
+	annotations.Description = strings.TrimSpace(meta[policyAnnotationDescription])
+	annotations.Resource = strings.TrimSpace(meta[policyAnnotationResource])
+	annotations.Severity = strings.TrimSpace(meta[policyAnnotationSeverity])
+	annotations.Remediation = strings.TrimSpace(meta[policyAnnotationRemediation])
+	annotations.Product = strings.TrimSpace(meta[policyAnnotationProduct])
 	return annotations
 }
 

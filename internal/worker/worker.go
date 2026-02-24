@@ -1,12 +1,12 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package worker
 
 import "runtime"
 
-// workerLimit caps concurrency to the scheduler limit and available work.
-func workerLimit(total int) int {
+// WorkerLimit caps concurrency to the scheduler limit and available work.
+func WorkerLimit(total int) int {
 	if total <= 0 {
 		return 1
 	}

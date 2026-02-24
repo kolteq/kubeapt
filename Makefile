@@ -1,5 +1,5 @@
 PROJECT := kubeapt
-SOURCES := ./main.go
+SOURCES := ./cmd/kubeapt
 BIN_DIR := bin
 PLATFORMS := \
 	darwin/amd64 \

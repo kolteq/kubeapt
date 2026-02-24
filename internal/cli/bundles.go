@@ -1,7 +1,7 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package cli
 
 import (
 	"archive/tar"
@@ -223,11 +223,11 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 	if err != nil {
 		return err
 	}
-	psaLevelRaw, err := flags.GetString("psa-level")
+	psaLevelInput, err := flags.GetString("psa-level")
 	if err != nil {
 		return err
 	}
-	psaLevel := strings.ToLower(strings.TrimSpace(psaLevelRaw))
+	psaLevel := strings.ToLower(strings.TrimSpace(psaLevelInput))
 	if psaLevel != "" && psaLevel != "baseline" && psaLevel != "restricted" {
 		return fmt.Errorf("invalid psa level %s, expected baseline or restricted", psaLevel)
 	}
@@ -239,7 +239,7 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 		return fmt.Errorf("--psa-level is only supported with bundle pod-security-admission")
 	}
 
-	clientset, err := kubernetes.Init()
+	clientset, err := kubernetes.NewClientset()
 	if err != nil {
 		return err
 	}
@@ -257,38 +257,38 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 		}
 	}
 	if allNamespaces {
-		nsList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+		namespaceList, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
-		namespaces = make([]string, 0, len(nsList.Items))
-		for _, ns := range nsList.Items {
-			namespaces = append(namespaces, ns.Name)
+		namespaces = make([]string, 0, len(namespaceList.Items))
+		for _, namespace := range namespaceList.Items {
+			namespaces = append(namespaces, namespace.Name)
 		}
 	}
 
 	if !overwrite && !remove {
-		for _, nsName := range namespaces {
-			nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
+		for _, namespaceName := range namespaces {
+			namespaceObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), namespaceName, metav1.GetOptions{})
 			if err != nil {
 				return err
 			}
-			labels := nsObj.Labels
+			labels := namespaceObj.Labels
 			if labels == nil {
 				continue
 			}
 			if _, has := labels[targetKey]; has {
-				return fmt.Errorf("namespace %s already has a bundle %s label; use --overwrite to update it", nsName, mode)
+				return fmt.Errorf("namespace %s already has a bundle %s label; use --overwrite to update it", namespaceName, mode)
 			}
 		}
 	}
 
-	for _, nsName := range namespaces {
-		nsObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
+	for _, namespaceName := range namespaces {
+		namespaceObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), namespaceName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		labels := nsObj.Labels
+		labels := namespaceObj.Labels
 		if labels == nil {
 			labels = make(map[string]string)
 		}
@@ -296,16 +296,16 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 		if remove {
 			if _, ok := labels[targetKey]; !ok {
 				if !allNamespaces {
-					return fmt.Errorf("label %s is not set on namespace %s", targetKey, nsName)
+					return fmt.Errorf("label %s is not set on namespace %s", targetKey, namespaceName)
 				}
 				continue
 			}
 			delete(labels, targetKey)
-			nsObj.Labels = labels
-			if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), nsObj, metav1.UpdateOptions{}); err != nil {
+			namespaceObj.Labels = labels
+			if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), namespaceObj, metav1.UpdateOptions{}); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s from namespace %s\n", targetKey, nsName)
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s from namespace %s\n", targetKey, namespaceName)
 			continue
 		}
 
@@ -316,11 +316,11 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 		if isPSA {
 			labels[targetKey] = psaLevel
 		}
-		nsObj.Labels = labels
-		if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), nsObj, metav1.UpdateOptions{}); err != nil {
+		namespaceObj.Labels = labels
+		if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), namespaceObj, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Set %s=%s on namespace %s\n", targetKey, labels[targetKey], nsName)
+		fmt.Fprintf(cmd.OutOrStdout(), "Set %s=%s on namespace %s\n", targetKey, labels[targetKey], namespaceName)
 	}
 
 	return nil
@@ -698,11 +698,11 @@ func runBundleShow(cmd *cobra.Command, bundleName, version, format string) error
 			}
 		}
 	default:
-		policies, err := kubernetes.GetLocalValidatingAdmissionPolicies(policiesPath)
+		policies, err := kubernetes.LoadValidatingAdmissionPolicies(policiesPath)
 		if err != nil {
 			return err
 		}
-		bindings, err := kubernetes.GetLocalValidatingAdmissionPolicyBindings(bindingsPath)
+		bindings, err := kubernetes.LoadValidatingAdmissionPolicyBindings(bindingsPath)
 		if err != nil {
 			return err
 		}
@@ -1112,7 +1112,7 @@ func preflightBundleBindings(ctx context.Context, bundleName, version string, ov
 		}
 		return err
 	}
-	bindings, err := kubernetes.GetLocalValidatingAdmissionPolicyBindings(bindingsPath)
+	bindings, err := kubernetes.LoadValidatingAdmissionPolicyBindings(bindingsPath)
 	if err != nil {
 		return err
 	}
@@ -1120,7 +1120,7 @@ func preflightBundleBindings(ctx context.Context, bundleName, version string, ov
 		return nil
 	}
 
-	clientset, err := kubernetes.Init()
+	clientset, err := kubernetes.NewClientset()
 	if err != nil {
 		return err
 	}
@@ -1151,7 +1151,7 @@ func preflightBundleBindings(ctx context.Context, bundleName, version string, ov
 }
 
 func installedBundleVersionIndex(ctx context.Context) (map[string]map[string]struct{}, error) {
-	clientset, err := kubernetes.Init()
+	clientset, err := kubernetes.NewClientset()
 	if err != nil {
 		return nil, err
 	}
@@ -1265,7 +1265,7 @@ func loadUnstructuredResources(files []string) ([]*unstructured.Unstructured, er
 }
 
 func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress func(), dryRun bool) error {
-	config, err := kubernetes.Config()
+	config, err := kubernetes.RESTConfig()
 	if err != nil {
 		return err
 	}
@@ -1298,15 +1298,15 @@ func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress 
 		}
 		var client dynamic.ResourceInterface
 		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-			ns := resource.GetNamespace()
-			if ns == "" {
-				ns = kubernetes.ActiveNamespace()
-				if ns == "" {
-					ns = "default"
+			namespaceName := resource.GetNamespace()
+			if namespaceName == "" {
+				namespaceName = kubernetes.ActiveNamespace()
+				if namespaceName == "" {
+					namespaceName = "default"
 				}
-				resource.SetNamespace(ns)
+				resource.SetNamespace(namespaceName)
 			}
-			client = dynamicClient.Resource(mapping.Resource).Namespace(ns)
+			client = dynamicClient.Resource(mapping.Resource).Namespace(namespaceName)
 		} else {
 			client = dynamicClient.Resource(mapping.Resource)
 		}
@@ -1332,7 +1332,7 @@ func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress 
 }
 
 func deleteKustomizeResources(resources []*unstructured.Unstructured, onProgress func(), dryRun bool) error {
-	config, err := kubernetes.Config()
+	config, err := kubernetes.RESTConfig()
 	if err != nil {
 		return err
 	}
@@ -1366,15 +1366,15 @@ func deleteKustomizeResources(resources []*unstructured.Unstructured, onProgress
 		}
 		var client dynamic.ResourceInterface
 		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-			ns := resource.GetNamespace()
-			if ns == "" {
-				ns = kubernetes.ActiveNamespace()
-				if ns == "" {
-					ns = "default"
+			namespaceName := resource.GetNamespace()
+			if namespaceName == "" {
+				namespaceName = kubernetes.ActiveNamespace()
+				if namespaceName == "" {
+					namespaceName = "default"
 				}
-				resource.SetNamespace(ns)
+				resource.SetNamespace(namespaceName)
 			}
-			client = dynamicClient.Resource(mapping.Resource).Namespace(ns)
+			client = dynamicClient.Resource(mapping.Resource).Namespace(namespaceName)
 		} else {
 			client = dynamicClient.Resource(mapping.Resource)
 		}

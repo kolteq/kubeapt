@@ -3,8 +3,8 @@
 
 package main
 
-import "github.com/kolteq/kubeapt/cmd"
+import "github.com/kolteq/kubeapt/internal/cli"
 
 func main() {
-	cmd.Execute()
+	cli.Execute()
 }

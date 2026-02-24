@@ -20,7 +20,7 @@ func MatchesPolicy(vap *admissionregistrationv1.ValidatingAdmissionPolicy, obj m
 		return false
 	}
 
-	return matchResources(obj, namespaceLabels, namespaceKnown, vap.Spec.MatchConstraints, true, ignoreNamespaceSelectors, false)
+	return matchesResources(obj, namespaceLabels, namespaceKnown, vap.Spec.MatchConstraints, true, ignoreNamespaceSelectors, false)
 }
 
 // MatchesBinding evaluates whether a resource satisfies the optional selectors declared on a binding.
@@ -33,19 +33,19 @@ func MatchesBinding(binding *admissionregistrationv1.ValidatingAdmissionPolicyBi
 		return true
 	}
 
-	return matchResources(obj, namespaceLabels, namespaceKnown, binding.Spec.MatchResources, false, ignoreNamespaceSelectors, ignoreObjectSelectors)
+	return matchesResources(obj, namespaceLabels, namespaceKnown, binding.Spec.MatchResources, false, ignoreNamespaceSelectors, ignoreObjectSelectors)
 }
 
-func matchResources(obj map[string]interface{}, namespaceLabels map[string]string, namespaceKnown bool, constraints *admissionregistrationv1.MatchResources, requireResourceRules bool, ignoreNamespaceSelectors bool, ignoreObjectSelectors bool) bool {
+func matchesResources(obj map[string]interface{}, namespaceLabels map[string]string, namespaceKnown bool, constraints *admissionregistrationv1.MatchResources, requireResourceRules bool, ignoreNamespaceSelectors bool, ignoreObjectSelectors bool) bool {
 	if constraints == nil {
 		return !requireResourceRules
 	}
 
-	if !namespaceMatches(constraints.NamespaceSelector, obj, namespaceLabels, namespaceKnown, ignoreNamespaceSelectors) {
+	if !matchesNamespaceSelector(constraints.NamespaceSelector, obj, namespaceLabels, namespaceKnown, ignoreNamespaceSelectors) {
 		return false
 	}
 
-	if !objectMatches(constraints.ObjectSelector, obj, ignoreObjectSelectors) {
+	if !matchesObjectSelector(constraints.ObjectSelector, obj, ignoreObjectSelectors) {
 		return false
 	}
 
@@ -64,7 +64,7 @@ func matchResources(obj map[string]interface{}, namespaceLabels map[string]strin
 	return true
 }
 
-func namespaceMatches(selector *metav1.LabelSelector, obj map[string]interface{}, namespaceLabels map[string]string, namespaceKnown bool, ignore bool) bool {
+func matchesNamespaceSelector(selector *metav1.LabelSelector, obj map[string]interface{}, namespaceLabels map[string]string, namespaceKnown bool, ignore bool) bool {
 	if selector == nil || ignore {
 		return true
 	}
@@ -72,11 +72,11 @@ func namespaceMatches(selector *metav1.LabelSelector, obj map[string]interface{}
 	kind, _ := obj["kind"].(string)
 	if strings.EqualFold(kind, "Namespace") {
 		// Namespace objects evaluate selectors against their own labels.
-		namespaceLabels = GetMetadataLabels(obj)
+		namespaceLabels = MetadataLabels(obj)
 		namespaceKnown = true
 	}
 
-	namespace := GetMetadataString(obj, "namespace")
+	namespace := MetadataString(obj, "namespace")
 	if namespace == "" && !strings.EqualFold(kind, "Namespace") {
 		return true
 	}
@@ -94,7 +94,7 @@ func namespaceMatches(selector *metav1.LabelSelector, obj map[string]interface{}
 	return nsSelector.Matches(labels.Set(namespaceLabels))
 }
 
-func objectMatches(selector *metav1.LabelSelector, obj map[string]interface{}, ignore bool) bool {
+func matchesObjectSelector(selector *metav1.LabelSelector, obj map[string]interface{}, ignore bool) bool {
 	if selector == nil || ignore {
 		return true
 	}
@@ -104,7 +104,7 @@ func objectMatches(selector *metav1.LabelSelector, obj map[string]interface{}, i
 		return false
 	}
 
-	return objSelector.Matches(labels.Set(GetMetadataLabels(obj)))
+	return objSelector.Matches(labels.Set(MetadataLabels(obj)))
 }
 
 func matchesAnyRule(obj map[string]interface{}, rules []admissionregistrationv1.NamedRuleWithOperations) bool {
@@ -122,28 +122,28 @@ func matchesRule(obj map[string]interface{}, rule admissionregistrationv1.NamedR
 		return false
 	}
 
-	if len(rule.Operations) > 0 && !operationMatches(admissionregistrationv1.Create, rule.Operations) {
+	if len(rule.Operations) > 0 && !matchesOperation(admissionregistrationv1.Create, rule.Operations) {
 		return false
 	}
 
-	if len(rule.APIGroups) > 0 && !stringMatches(gvk.Group, rule.APIGroups) {
+	if len(rule.APIGroups) > 0 && !matchesStringRule(gvk.Group, rule.APIGroups) {
 		return false
 	}
 
-	if len(rule.APIVersions) > 0 && !stringMatches(gvk.Version, rule.APIVersions) {
+	if len(rule.APIVersions) > 0 && !matchesStringRule(gvk.Version, rule.APIVersions) {
 		return false
 	}
 
 	if len(rule.Resources) > 0 {
 		plural, _ := meta.UnsafeGuessKindToResource(gvk)
-		if !resourceMatches(plural.Resource, rule.Resources) {
+		if !matchesResourceRule(plural.Resource, rule.Resources) {
 			return false
 		}
 	}
 
 	if len(rule.ResourceNames) > 0 {
-		name := GetMetadataString(obj, "name")
-		if !stringMatches(name, rule.ResourceNames) {
+		name := MetadataString(obj, "name")
+		if !matchesStringRule(name, rule.ResourceNames) {
 			return false
 		}
 	}
@@ -158,7 +158,7 @@ func matchesRule(obj map[string]interface{}, rule admissionregistrationv1.NamedR
 	return true
 }
 
-func operationMatches(requestOp admissionregistrationv1.OperationType, allowed []admissionregistrationv1.OperationType) bool {
+func matchesOperation(requestOp admissionregistrationv1.OperationType, allowed []admissionregistrationv1.OperationType) bool {
 	for _, op := range allowed {
 		if op == admissionregistrationv1.OperationAll || op == requestOp {
 			return true
@@ -167,7 +167,7 @@ func operationMatches(requestOp admissionregistrationv1.OperationType, allowed [
 	return false
 }
 
-func stringMatches(value string, allowed []string) bool {
+func matchesStringRule(value string, allowed []string) bool {
 	for _, ruleValue := range allowed {
 		if ruleValue == "*" || ruleValue == value {
 			return true
@@ -176,7 +176,7 @@ func stringMatches(value string, allowed []string) bool {
 	return false
 }
 
-func resourceMatches(resource string, rules []string) bool {
+func matchesResourceRule(resource string, rules []string) bool {
 	if resource == "" {
 		return false
 	}
@@ -220,15 +220,15 @@ func extractGVK(obj map[string]interface{}) (schema.GroupVersionKind, bool) {
 }
 
 func detectScope(obj map[string]interface{}) admissionregistrationv1.ScopeType {
-	namespace := GetMetadataString(obj, "namespace")
+	namespace := MetadataString(obj, "namespace")
 	if namespace == "" {
 		return admissionregistrationv1.ClusterScope
 	}
 	return admissionregistrationv1.NamespacedScope
 }
 
-// GetMetadataString returns a metadata string field from the object if present.
-func GetMetadataString(obj map[string]interface{}, key string) string {
+// MetadataString returns a metadata string field from the object if present.
+func MetadataString(obj map[string]interface{}, key string) string {
 	metaFields, ok := obj["metadata"].(map[string]interface{})
 	if !ok {
 		return ""
@@ -241,8 +241,8 @@ func GetMetadataString(obj map[string]interface{}, key string) string {
 	return ""
 }
 
-// GetMetadataLabels returns the metadata.labels map as strings.
-func GetMetadataLabels(obj map[string]interface{}) map[string]string {
+// MetadataLabels returns the metadata.labels map as strings.
+func MetadataLabels(obj map[string]interface{}) map[string]string {
 	metaFields, ok := obj["metadata"].(map[string]interface{})
 	if !ok {
 		return nil

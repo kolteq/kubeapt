@@ -10,6 +10,8 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/kolteq/kubeapt/internal/worker"
 )
 
 type ResourceScope string
@@ -19,15 +21,15 @@ const (
 	ResourceScopeAllNamespaces ResourceScope = "all-namespaces"
 )
 
-func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.ValidatingAdmissionPolicy, scope ResourceScope, namespaces []string, onPolicy func()) ([]map[string]interface{}, map[string]map[string]string, error) {
+func ListResourcesForPoliciesWithProgress(policies []admissionregistrationv1.ValidatingAdmissionPolicy, scope ResourceScope, namespaces []string, onPolicy func()) ([]map[string]interface{}, map[string]map[string]string, error) {
 	var all []map[string]interface{}
-	nsSet := map[string]struct{}{}
+	namespaceSet := map[string]struct{}{}
 	dedup := map[string]struct{}{}
 	allowed := buildNamespaceFilter(namespaces)
 	defaultNamespace := ActiveNamespace()
 
 	if len(policies) > 0 {
-		workers := workerLimit(len(policies))
+		workers := worker.WorkerLimit(len(policies))
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		tasks := make(chan admissionregistrationv1.ValidatingAdmissionPolicy, workers*2)
@@ -70,7 +72,7 @@ func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.Va
 						if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) == 0 {
 							continue
 						}
-						remote, err := FetchRemoteResourcesForRules(policy.Spec.MatchConstraints.ResourceRules)
+						remote, err := ListResourcesForRules(policy.Spec.MatchConstraints.ResourceRules)
 						if err != nil {
 							select {
 							case errCh <- err:
@@ -80,8 +82,8 @@ func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.Va
 							return
 						}
 						for _, obj := range remote {
-							ns := GetMetadataString(obj, "namespace")
-							if !namespaceAllowed(ns, scope, allowed, defaultNamespace) {
+							namespaceName := MetadataString(obj, "namespace")
+							if !isNamespaceAllowed(namespaceName, scope, allowed, defaultNamespace) {
 								continue
 							}
 							key := resourceKey(obj)
@@ -92,8 +94,8 @@ func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.Va
 							}
 							dedup[key] = struct{}{}
 							all = append(all, obj)
-							if ns != "" {
-								nsSet[ns] = struct{}{}
+							if namespaceName != "" {
+								namespaceSet[namespaceName] = struct{}{}
 							}
 							mu.Unlock()
 						}
@@ -120,7 +122,7 @@ func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.Va
 		}
 	}
 
-	nsLabels, err := loadNamespaceLabels(nsSet)
+	nsLabels, err := loadNamespaceLabels(namespaceSet)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -130,20 +132,20 @@ func FetchResourcesForPoliciesWithProgress(policies []admissionregistrationv1.Va
 
 func buildNamespaceFilter(namespaces []string) map[string]struct{} {
 	filter := make(map[string]struct{})
-	for _, ns := range namespaces {
-		if ns != "" {
-			filter[ns] = struct{}{}
+	for _, namespaceName := range namespaces {
+		if namespaceName != "" {
+			filter[namespaceName] = struct{}{}
 		}
 	}
 	return filter
 }
 
-func namespaceAllowed(ns string, scope ResourceScope, allowed map[string]struct{}, defaultNamespace string) bool {
-	if ns == "" {
+func isNamespaceAllowed(namespaceName string, scope ResourceScope, allowed map[string]struct{}, defaultNamespace string) bool {
+	if namespaceName == "" {
 		return true
 	}
 	if len(allowed) > 0 {
-		_, ok := allowed[ns]
+		_, ok := allowed[namespaceName]
 		return ok
 	}
 	if scope == ResourceScopeAllNamespaces {
@@ -152,14 +154,14 @@ func namespaceAllowed(ns string, scope ResourceScope, allowed map[string]struct{
 	if defaultNamespace == "" {
 		return true
 	}
-	return ns == defaultNamespace
+	return namespaceName == defaultNamespace
 }
 
 func resourceKey(obj map[string]interface{}) string {
 	kind, _ := obj["kind"].(string)
-	namespace := GetMetadataString(obj, "namespace")
-	name := GetMetadataString(obj, "name")
-	uid := GetMetadataString(obj, "uid")
+	namespace := MetadataString(obj, "namespace")
+	name := MetadataString(obj, "name")
+	uid := MetadataString(obj, "uid")
 	return fmt.Sprintf("%s/%s/%s/%s", kind, namespace, name, uid)
 }
 
@@ -168,16 +170,16 @@ func loadNamespaceLabels(names map[string]struct{}) (map[string]map[string]strin
 	if len(names) == 0 {
 		return result, nil
 	}
-	clientset, err := Init()
+	clientset, err := NewClientset()
 	if err != nil {
 		return nil, err
 	}
 	for name := range names {
-		ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), name, metav1.GetOptions{})
+		namespaceObj, err := clientset.CoreV1().Namespaces().Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			continue
 		}
-		result[name] = ns.Labels
+		result[name] = namespaceObj.Labels
 	}
 	return result, nil
 }

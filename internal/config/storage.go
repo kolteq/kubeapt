@@ -199,7 +199,7 @@ func LocateBundleFiles(bundleName, version string) (string, string, bool, error)
 func LoadPoliciesFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {
 	var policies []admissionregistrationv1.ValidatingAdmissionPolicy
 	for _, file := range files {
-		items, err := kubernetes.GetLocalValidatingAdmissionPolicies(file)
+		items, err := kubernetes.LoadValidatingAdmissionPolicies(file)
 		if err != nil {
 			return nil, err
 		}
@@ -214,7 +214,7 @@ func LoadPoliciesFromFilesWithProgress(files []string, onFile func()) ([]admissi
 func LoadBindingsFromFilesWithProgress(files []string, onFile func()) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
 	var bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	for _, file := range files {
-		items, err := kubernetes.GetLocalValidatingAdmissionPolicyBindings(file)
+		items, err := kubernetes.LoadValidatingAdmissionPolicyBindings(file)
 		if err != nil {
 			return nil, err
 		}

@@ -1,7 +1,7 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package kubernetes
 
 import (
 	"context"
@@ -10,17 +10,26 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
-	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/worker"
 )
 
-type psaComplianceCounts struct {
-	Compliant    int
-	NonCompliant int
-	Violations   []violationDetail
+type PSAViolation struct {
+	Policy   string
+	Binding  string
+	Resource string
+	Message  string
+	Path     string
+	Actions  []string
 }
 
-func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreBindings bool, level string, onProgress func()) (map[string]psaComplianceCounts, error) {
-	results := make(map[string]psaComplianceCounts)
+type PSAComplianceCounts struct {
+	Compliant    int
+	NonCompliant int
+	Violations   []PSAViolation
+}
+
+func EvaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreBindings bool, level string, onProgress func()) (map[string]PSAComplianceCounts, error) {
+	results := make(map[string]PSAComplianceCounts)
 	if len(policies) == 0 || len(bindings) == 0 || len(resources) == 0 {
 		return results, nil
 	}
@@ -62,7 +71,7 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 
 		var mu sync.Mutex
 		ctx, cancel := context.WithCancel(context.Background())
-		workers := workerLimit(len(resources))
+		workers := worker.WorkerLimit(len(resources))
 		tasks := make(chan map[string]interface{}, workers*2)
 		errCh := make(chan error, 1)
 		var wg sync.WaitGroup
@@ -81,29 +90,29 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 						if progressCh != nil {
 							progressCh <- struct{}{}
 						}
-						nsName := kubernetes.GetMetadataString(resource, "namespace")
-						if nsName == "" {
-							nsName = kubernetes.ActiveNamespace()
+						namespaceName := MetadataString(resource, "namespace")
+						if namespaceName == "" {
+							namespaceName = ActiveNamespace()
 						}
-						if nsName == "" {
-							nsName = "default"
+						if namespaceName == "" {
+							namespaceName = "default"
 						}
-						nsLabels, nsKnown := expandedLabels[nsName]
+						namespaceLabelValues, namespaceKnown := expandedLabels[namespaceName]
 						if level != "" {
-							nsLabels = applyPSALevelLabels(nsLabels, level)
-							nsKnown = true
+							namespaceLabelValues = ApplyPSALevelLabels(namespaceLabelValues, level)
+							namespaceKnown = true
 						}
 
-						if !kubernetes.MatchesPolicy(policy, resource, nsLabels, nsKnown, false) {
+						if !MatchesPolicy(policy, resource, namespaceLabelValues, namespaceKnown, false) {
 							continue
 						}
 						if !ignoreBindings {
-							if !kubernetes.MatchesBinding(binding, resource, nsLabels, nsKnown, false, false) {
+							if !MatchesBinding(binding, resource, namespaceLabelValues, namespaceKnown, false, false) {
 								continue
 							}
 						}
 
-						result, err := evaluateValidations(policy, binding, resource, nsName, nsLabels)
+						result, err := EvaluateValidations(policy, binding, resource, namespaceName, namespaceLabelValues)
 						if err != nil {
 							select {
 							case errCh <- err:
@@ -113,40 +122,40 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 							return
 						}
 
-						id := resourceIdentifier(resource)
+						resourceKeyValue := resourceKey(resource)
 						if result.Compliant {
 							mu.Lock()
-							matched[id] = struct{}{}
-							resourceNamespace[id] = nsName
-							if _, ok := status[id]; !ok {
-								status[id] = true
+							matched[resourceKeyValue] = struct{}{}
+							resourceNamespace[resourceKeyValue] = namespaceName
+							if _, ok := status[resourceKeyValue]; !ok {
+								status[resourceKeyValue] = true
 							}
 							mu.Unlock()
 							continue
 						}
 
-						resName := describeResource(resource)
-						violations := make([]violationDetail, len(result.Violations))
+						resourceName := describeResource(resource)
+						violations := make([]PSAViolation, len(result.Violations))
 						for i, violation := range result.Violations {
-							violations[i] = violationDetail{
+							violations[i] = PSAViolation{
 								Policy:   policy.Name,
 								Binding:  binding.Name,
-								Resource: resName,
+								Resource: resourceName,
 								Message:  violation.Message,
 								Path:     violation.Path,
 								Actions:  violation.Actions,
 							}
 						}
 						mu.Lock()
-						matched[id] = struct{}{}
-						resourceNamespace[id] = nsName
-						if _, ok := status[id]; !ok {
-							status[id] = true
+						matched[resourceKeyValue] = struct{}{}
+						resourceNamespace[resourceKeyValue] = namespaceName
+						if _, ok := status[resourceKeyValue]; !ok {
+							status[resourceKeyValue] = true
 						}
-						status[id] = false
-						nsResult := results[nsName]
-						nsResult.Violations = append(nsResult.Violations, violations...)
-						results[nsName] = nsResult
+						status[resourceKeyValue] = false
+						namespaceResult := results[namespaceName]
+						namespaceResult.Violations = append(namespaceResult.Violations, violations...)
+						results[namespaceName] = namespaceResult
 						mu.Unlock()
 					}
 				}
@@ -172,23 +181,23 @@ func evaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 	}
 
 	for id := range matched {
-		nsName := resourceNamespace[id]
-		if nsName == "" {
+		namespaceName := resourceNamespace[id]
+		if namespaceName == "" {
 			continue
 		}
-		counts := results[nsName]
+		counts := results[namespaceName]
 		if status[id] {
 			counts.Compliant++
 		} else {
 			counts.NonCompliant++
 		}
-		results[nsName] = counts
+		results[namespaceName] = counts
 	}
 
 	return results, nil
 }
 
-func applyPSALevelLabels(labels map[string]string, level string) map[string]string {
+func ApplyPSALevelLabels(labels map[string]string, level string) map[string]string {
 	if level == "" {
 		return labels
 	}
@@ -208,8 +217,8 @@ func expandPSANamespaceLabelIndex(labels map[string]map[string]string) map[strin
 		return nil
 	}
 	result := make(map[string]map[string]string, len(labels))
-	for ns, nsLabels := range labels {
-		result[ns] = expandPSANamespaceLabels(nsLabels)
+	for namespaceName, namespaceLabels := range labels {
+		result[namespaceName] = expandPSANamespaceLabels(namespaceLabels)
 	}
 	return result
 }
@@ -235,4 +244,14 @@ func expandPSANamespaceLabels(labels map[string]string) map[string]string {
 		}
 	}
 	return result
+}
+
+func describeResource(obj map[string]interface{}) string {
+	kind, _ := obj["kind"].(string)
+	name := MetadataString(obj, "name")
+	namespace := MetadataString(obj, "namespace")
+	if namespace == "" {
+		namespace = "<cluster>"
+	}
+	return fmt.Sprintf("%s %s/%s", kind, namespace, name)
 }

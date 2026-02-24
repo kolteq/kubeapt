@@ -1,7 +1,7 @@
 // Copyright by KolTEQ GmbH
 // Contact: benjamin@kolteq.com
 
-package cmd
+package cli
 
 import (
 	"context"
@@ -36,13 +36,13 @@ func ScanCmd() *cobra.Command {
 }
 
 func runScan(cmd *cobra.Command, _ []string) error {
-	clientset, err := kubernetes.Init()
+	clientset, err := kubernetes.NewClientset()
 	if err != nil {
 		return err
 	}
 
 	fmt.Println("[1/4] Inspecting namespaces and admission controllers...")
-	if err := reportPSSAndPolicies(clientset); err != nil {
+	if err := reportPSAAndPolicies(clientset); err != nil {
 		return err
 	}
 
@@ -187,12 +187,12 @@ func isVersionNewer(latest, current string) bool {
 	return latest != current
 }
 
-func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
+func reportPSAAndPolicies(clientset *kubeclient.Clientset) error {
 	progressEnabled := true
-	var nsList *corev1.NamespaceList
+	var namespaceList *corev1.NamespaceList
 	err := withProgress("Fetching namespaces", 1, progressEnabled, func(tracker *progress.Tracker) error {
 		var listErr error
-		nsList, listErr = clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+		namespaceList, listErr = clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 		if listErr != nil {
 			return listErr
 		}
@@ -203,9 +203,9 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		return err
 	}
 
-	namespaceLabels := make(map[string]map[string]string, len(nsList.Items))
-	for _, ns := range nsList.Items {
-		namespaceLabels[ns.Name] = convertPSANamespaceLabels(ns.Labels)
+	namespaceLabels := make(map[string]map[string]string, len(namespaceList.Items))
+	for _, namespace := range namespaceList.Items {
+		namespaceLabels[namespace.Name] = convertPSANamespaceLabels(namespace.Labels)
 	}
 
 	bundleName := "pod-security-admission"
@@ -217,8 +217,8 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 	var (
 		resources  []map[string]interface{}
 		pods       []corev1.Pod
-		compliance = map[string]psaComplianceCounts{}
-		vaps       []admissionv1.ValidatingAdmissionPolicy
+		compliance = map[string]kubernetes.PSAComplianceCounts{}
+		policies   []admissionv1.ValidatingAdmissionPolicy
 		bindings   []admissionv1.ValidatingAdmissionPolicyBinding
 	)
 
@@ -233,7 +233,7 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		}
 		totalFiles := maxInt64(int64(len(policyFiles)+len(bindingFiles)), 1)
 		err = withProgress("Reading PSA policies", totalFiles, progressEnabled, func(tracker *progress.Tracker) error {
-			vaps, err = config.LoadPoliciesFromFilesWithProgress(policyFiles, func() {
+			policies, err = config.LoadPoliciesFromFilesWithProgress(policyFiles, func() {
 				tracker.Increment(1)
 			})
 			if err != nil {
@@ -247,17 +247,17 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		if err != nil {
 			return err
 		}
-		if len(vaps) > 0 && len(bindings) > 0 {
-			total := maxInt64(int64(len(vaps)), 1)
+		if len(policies) > 0 && len(bindings) > 0 {
+			total := maxInt64(int64(len(policies)), 1)
 			err = withProgress("Fetching policy resources", total, progressEnabled, func(tracker *progress.Tracker) error {
-				remoteRes, remoteNS, err := kubernetes.FetchResourcesForPoliciesWithProgress(vaps, kubernetes.ResourceScopeAllNamespaces, nil, func() {
+				remoteResources, remoteNamespaceLabels, err := kubernetes.ListResourcesForPoliciesWithProgress(policies, kubernetes.ResourceScopeAllNamespaces, nil, func() {
 					tracker.Increment(1)
 				})
 				if err != nil {
 					return err
 				}
-				resources = append(resources, remoteRes...)
-				namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNS, nil, true)
+				resources = append(resources, remoteResources...)
+				namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, remoteNamespaceLabels, nil, true)
 				return nil
 			})
 			if err != nil {
@@ -272,12 +272,12 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		totalWork := len(resources) * len(bindings)
 		if totalWork > 0 {
 			tracker, stop := startProgress("Evaluating PSA compliance", int64(totalWork), progressEnabled)
-			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, "", func() {
+			compliance, err = kubernetes.EvaluatePSACompliance(policies, bindings, resources, namespaceLabels, false, "", func() {
 				tracker.Increment(1)
 			})
 			stop()
 		} else {
-			compliance, err = evaluatePSACompliance(vaps, bindings, resources, namespaceLabels, false, "", nil)
+			compliance, err = kubernetes.EvaluatePSACompliance(policies, bindings, resources, namespaceLabels, false, "", nil)
 		}
 		if err != nil {
 			return err
@@ -290,16 +290,16 @@ func reportPSSAndPolicies(clientset *kubeclient.Clientset) error {
 		fmt.Fprintf(os.Stderr, "Policy bundle %s not found in %s. Run `kubeapt bundles download %s` to install.\n", bundleName, root, bundleName)
 	}
 
-	results, usesKolteq := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
-	printPSATable(results, usesKolteq, os.Stdout, table.StyleRounded)
+	results, usesKolteqLabels := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
+	printPSATable(results, usesKolteqLabels, os.Stdout, table.StyleRounded)
 	fmt.Fprintln(os.Stdout, "For details run `kubeapt validate --bundle pod-security-admission --psa-level <baseline|restricted> --all-namespaces --report all`")
 	fmt.Fprintln(os.Stdout)
 
-	vaps, err = kubernetes.GetRemoteValidatingAdmissionPolicies()
+	policies, err = kubernetes.ListValidatingAdmissionPolicies()
 	if err != nil {
 		fmt.Printf("Error fetching ValidatingAdmissionPolicies: %v\n", err)
-	} else if len(vaps) > 0 {
-		fmt.Printf("ValidatingAdmissionPolicies present: %d\n", len(vaps))
+	} else if len(policies) > 0 {
+		fmt.Printf("ValidatingAdmissionPolicies present: %d\n", len(policies))
 	} else {
 		fmt.Println("No ValidatingAdmissionPolicies detected.")
 	}
@@ -325,11 +325,11 @@ func detectThirdPartyAdmissionControllers(clientset *kubeclient.Clientset) (kyve
 	}
 	for _, dep := range deployments.Items {
 		name := strings.ToLower(dep.Name)
-		ns := strings.ToLower(dep.Namespace)
-		if strings.Contains(name, "kyverno") || ns == "kyverno" {
+		namespace := strings.ToLower(dep.Namespace)
+		if strings.Contains(name, "kyverno") || namespace == "kyverno" {
 			kyverno = true
 		}
-		if strings.Contains(name, "gatekeeper") || ns == "gatekeeper-system" {
+		if strings.Contains(name, "gatekeeper") || namespace == "gatekeeper-system" {
 			gatekeeper = true
 		}
 	}
