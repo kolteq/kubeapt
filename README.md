@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" width="250" alt="kubeapt logo" />
+  <img src="logo.png" width="400" alt="kubeapt logo" />
 </p>
 
 <p align="center">
