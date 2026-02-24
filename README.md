@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="logo.png" width="140" alt="kubeapt logo" />
+  <img src="logo.png" width="250" alt="kubeapt logo" />
 </p>
-
-<h1 align="center">kubeapt</h1>
 
 <p align="center">
   Kubernetes Admission Policy Toolkit
