@@ -9,15 +9,19 @@ import (
 	"strings"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
-func GetRemoteGeneric(apiGroups, apiVersions, resources []string) ([]map[string]interface{}, error) {
-	clientset, err := Init()
+func ListGenericResources(apiGroups, apiVersions, resources []string) ([]map[string]interface{}, error) {
+	clientset, err := NewClientset()
 	if err != nil {
 		return nil, err
 	}
 
-	urls := draftUrls(apiGroups, apiVersions, resources)
+	urls, err := draftURLs(clientset, apiGroups, apiVersions, resources)
+	if err != nil {
+		return nil, err
+	}
 	var returned []map[string]interface{}
 
 	restClient := clientset.RESTClient()
@@ -67,11 +71,11 @@ func GetRemoteGeneric(apiGroups, apiVersions, resources []string) ([]map[string]
 	return returned, nil
 }
 
-func FetchRemoteResourcesForRules(rules []admissionregistrationv1.NamedRuleWithOperations) ([]map[string]interface{}, error) {
+func ListResourcesForRules(rules []admissionregistrationv1.NamedRuleWithOperations) ([]map[string]interface{}, error) {
 	var all []map[string]interface{}
 	for _, rule := range rules {
 		resources := extractPrimaryResources(rule.Resources)
-		remote, err := GetRemoteGeneric(rule.APIGroups, rule.APIVersions, resources)
+		remote, err := ListGenericResources(rule.APIGroups, rule.APIVersions, resources)
 		if err != nil {
 			return nil, err
 		}
@@ -98,35 +102,29 @@ func extractPrimaryResources(resources []string) []string {
 	return out
 }
 
-type kubernetesQueryUrl struct {
+type kubernetesQueryURL struct {
 	apiGroup    string
 	apiVersions []string
 	resources   []string
 }
 
-func draftUrls(apiGroups, apiVersions, resources []string) []string {
-	clientset, err := Init()
-
-	if err != nil {
-		panic(err.Error())
-	}
-
-	urlDrafts := make([]kubernetesQueryUrl, 0)
+func draftURLs(clientset *kubernetes.Clientset, apiGroups, apiVersions, resources []string) ([]string, error) {
+	urlDrafts := make([]kubernetesQueryURL, 0)
 
 	// Handle wildcard case "*" for apiGroups
 	if len(apiGroups) == 1 && apiGroups[0] == "*" {
 		groups, err := clientset.DiscoveryClient.ServerGroups()
 		if err != nil {
-			panic(err.Error())
+			return nil, err
 		}
 		for _, group := range groups.Groups {
-			urlDrafts = append(urlDrafts, kubernetesQueryUrl{
+			urlDrafts = append(urlDrafts, kubernetesQueryURL{
 				apiGroup: group.Name,
 			})
 		}
 	} else {
 		for _, group := range apiGroups {
-			urlDrafts = append(urlDrafts, kubernetesQueryUrl{
+			urlDrafts = append(urlDrafts, kubernetesQueryURL{
 				apiGroup: group,
 			})
 		}
@@ -136,7 +134,7 @@ func draftUrls(apiGroups, apiVersions, resources []string) []string {
 		if len(apiVersions) == 1 && apiVersions[0] == "*" {
 			groups, err := clientset.DiscoveryClient.ServerGroups()
 			if err != nil {
-				panic(err.Error())
+				return nil, err
 			}
 			for _, group := range groups.Groups {
 				for _, version := range group.Versions {
@@ -152,14 +150,14 @@ func draftUrls(apiGroups, apiVersions, resources []string) []string {
 		if len(resources) == 1 && resources[0] == "*" {
 			groups, err := clientset.DiscoveryClient.ServerGroups()
 			if err != nil {
-				panic(err.Error())
+				return nil, err
 			}
 			for _, group := range groups.Groups {
 				for _, version := range group.Versions {
 					if urlDrafts[i].apiGroup == group.Name {
 						resources, err := clientset.DiscoveryClient.ServerResourcesForGroupVersion(version.GroupVersion)
 						if err != nil {
-							panic(err.Error())
+							return nil, err
 						}
 						for _, resource := range resources.APIResources {
 							urlDrafts[i].resources = append(urlDrafts[i].resources, resource.Name)
@@ -185,5 +183,5 @@ func draftUrls(apiGroups, apiVersions, resources []string) []string {
 		}
 	}
 
-	return urls
+	return urls, nil
 }

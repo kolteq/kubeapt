@@ -6,6 +6,7 @@ package kubernetes
 import (
 	"os"
 	"strings"
+	"sync"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -15,6 +16,7 @@ import (
 var (
 	kubeconfigPath  string
 	activeNamespace = "default"
+	warningsOnce    sync.Once
 )
 
 func SetKubeconfig(path string) {
@@ -29,7 +31,11 @@ func ActiveNamespace() string {
 	return activeNamespace
 }
 
-func Config() (*rest.Config, error) {
+func RESTConfig() (*rest.Config, error) {
+	warningsOnce.Do(func() {
+		rest.SetDefaultWarningHandler(rest.NoWarnings{})
+	})
+
 	var config *rest.Config
 	var err error
 
@@ -64,8 +70,8 @@ func Config() (*rest.Config, error) {
 	return config, nil
 }
 
-func Init() (*kubernetes.Clientset, error) {
-	config, err := Config()
+func NewClientset() (*kubernetes.Clientset, error) {
+	config, err := RESTConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +91,9 @@ func detectNamespace(path string) string {
 	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
 	configOverrides := &clientcmd.ConfigOverrides{}
 	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-	ns, _, err := clientConfig.Namespace()
-	if err == nil && ns != "" {
-		return ns
+	namespaceName, _, err := clientConfig.Namespace()
+	if err == nil && namespaceName != "" {
+		return namespaceName
 	}
 	return "default"
 }
@@ -95,12 +101,42 @@ func detectNamespace(path string) string {
 func detectInClusterNamespace() string {
 	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	if err == nil {
-		if ns := strings.TrimSpace(string(data)); ns != "" {
-			return ns
+		if namespaceName := strings.TrimSpace(string(data)); namespaceName != "" {
+			return namespaceName
 		}
 	}
 	if kubeconfigPath != "" {
 		return detectNamespace(kubeconfigPath)
 	}
 	return "default"
+}
+
+func ClusterName() string {
+	if kubeconfigPath != "" {
+		return detectClusterName(kubeconfigPath)
+	}
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	kubeconfig := loadingRules.GetDefaultFilename()
+	return detectClusterName(kubeconfig)
+}
+
+func detectClusterName(path string) string {
+	if path == "" {
+		return ""
+	}
+	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
+	configOverrides := &clientcmd.ConfigOverrides{}
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+	rawConfig, err := clientConfig.RawConfig()
+	if err != nil {
+		return ""
+	}
+	if rawConfig.CurrentContext == "" {
+		return ""
+	}
+	ctx, ok := rawConfig.Contexts[rawConfig.CurrentContext]
+	if !ok || ctx == nil {
+		return ""
+	}
+	return ctx.Cluster
 }
