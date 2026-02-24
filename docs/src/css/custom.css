@@ -1,0 +1,51 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default. Infima is a CSS framework designed to
+ * work well for content-centric websites.
+ */
+
+/* You can override the default Infima variables here. */
+:root {
+  --ifm-color-primary: rgb(0 185 251/var(--tw-text-opacity,1));
+  --ifm-color-primary-dark: #29784c;
+  --ifm-color-primary-darker: #277148;
+  --ifm-color-primary-darkest: #205d3b;
+  --ifm-color-primary-light: #33925d;
+  --ifm-color-primary-lighter: #359962;
+  --ifm-color-primary-lightest: #3cad6e;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+
+  /* Menu stuff */
+  --ifm-menu-color-active: none;
+
+  /* Breadcrumbs */
+  --ifm-breadcrumb-color-active: none;
+
+  --ifm-color-content: rgb(18 18 69/var(--tw-text-opacity,1));
+  --ifm-background-color: rgb(245 243 240/var(--tw-bg-opacity,1));
+  --ifm-navbar-background-color: rgb(245 243 240/var(--tw-bg-opacity,1));
+  --ifm-footer-background-color: rgb(245 243 240/var(--tw-bg-opacity,1));
+
+  /* Link colors */
+  --ifm-link-color: none;
+  --ifm-link-hover-color: rgb(0 185 251/var(--tw-text-opacity,1));
+  --ifm-link-hover-decoration: none;
+
+  /* Footer stuff */
+  --ifm-footer-link-color: none;
+  --ifm-footer-link-hover-color: rgb(0 185 251/var(--tw-text-opacity,1));
+}
+
+.hero {
+  --ifm-hero-background-color: rgb(0 185 251/var(--tw-text-opacity,0.1));
+  --ifm-hero-text-color: black;
+}
+
+.button {
+  --ifm-button-background-color: rgb(254 187 20/var(--tw-text-opacity,1));
+}
+
+.footer a[class*="footerLogoLink"] {
+  opacity: 1 !important;
+}
