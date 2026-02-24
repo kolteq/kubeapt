@@ -9,16 +9,18 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/logging"
 )
 
 const appVersion = "1.0.0"
 
 var (
 	rootCmd = &cobra.Command{
-		Use:     "kubeapt",
-		Short:   "Kubernetes Admission Policy Toolkit",
-		Long:    `CLI toolkit for validating Kubernetes admission policies, Pod Security Admission labels, and cluster webhook safeguards.`,
-		Version: appVersion,
+		Use:           "kubeapt",
+		Short:         "Kubernetes Admission Policy Toolkit",
+		Long:          `CLI toolkit for validating Kubernetes admission policies, Pod Security Admission labels, and cluster webhook safeguards.`,
+		Version:       appVersion,
+		SilenceErrors: true,
 	}
 	logLevel       string
 	kubeconfigPath string
@@ -29,6 +31,10 @@ var (
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
+		if initErr := logging.Init("", getLogLevel()); initErr == nil {
+			logging.SetOutputWriter(rootCmd.ErrOrStderr())
+		}
+		logging.Errorf("%v", err)
 		os.Exit(1)
 	}
 }

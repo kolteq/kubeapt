@@ -22,6 +22,7 @@ import (
 
 	"github.com/kolteq/kubeapt/internal/config"
 	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/logging"
 )
 
 const (
@@ -66,6 +67,14 @@ func PoliciesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "policies",
 		Short: "Manage policies",
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := logging.Init("", getLogLevel()); err != nil {
+				return err
+			}
+			logging.SetOutputWriter(cmd.OutOrStdout())
+			logging.SetReportWriter(cmd.OutOrStdout())
+			return nil
+		},
 	}
 
 	cmd.AddCommand(newPoliciesListCmd())
@@ -182,7 +191,7 @@ func runPoliciesList(cmd *cobra.Command, local bool) error {
 		return err
 	}
 	if len(index.Versions) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No policy versions found.")
+		logging.Infof("No policy versions found.")
 		return nil
 	}
 	latest := index.LatestVersion
@@ -198,7 +207,7 @@ func runPoliciesList(cmd *cobra.Command, local bool) error {
 		downloadedSet[version] = struct{}{}
 	}
 	t := table.NewWriter()
-	t.SetOutputMirror(cmd.OutOrStdout())
+	t.SetOutputMirror(logging.Writer())
 	t.SetStyle(table.StyleRounded)
 	t.AppendHeader(table.Row{"Latest", "Versions", "Downloaded"})
 	versionLines := make([]string, 0, len(index.Versions))
@@ -213,7 +222,8 @@ func runPoliciesList(cmd *cobra.Command, local bool) error {
 	}
 	t.AppendRow(table.Row{latest, strings.Join(versionLines, "\n"), strings.Join(downloadedLines, "\n")})
 	t.Render()
-	fmt.Fprintln(cmd.OutOrStdout(), "\nLegend: x = version is downloaded")
+	logging.Newline()
+	logging.Infof("Legend: x = version is downloaded")
 	return nil
 }
 
@@ -266,7 +276,7 @@ func runPoliciesDownload(cmd *cobra.Command, version string) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Downloaded policies %s to %s\n", resolved, dest)
+	logging.Infof("Downloaded policies %s to %s", resolved, dest)
 	return nil
 }
 
@@ -342,9 +352,9 @@ func runPolicyInstall(cmd *cobra.Command, policyName, version string, overwrite,
 		return err
 	}
 	if dryRun {
-		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: install policy %s %s\n", policyName, resolved)
+		logging.Infof("Dry run: install policy %s %s", policyName, resolved)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "Installed policy %s %s\n", policyName, resolved)
+		logging.Infof("Installed policy %s %s", policyName, resolved)
 	}
 	return nil
 }
@@ -369,9 +379,9 @@ func runPolicyUninstall(cmd *cobra.Command, policyName, version string, dryRun b
 		return err
 	}
 	if dryRun {
-		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: uninstall policy %s %s\n", policyName, resolved)
+		logging.Infof("Dry run: uninstall policy %s %s", policyName, resolved)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "Uninstalled policy %s %s\n", policyName, resolved)
+		logging.Infof("Uninstalled policy %s %s", policyName, resolved)
 	}
 	return nil
 }
@@ -410,7 +420,7 @@ func runPolicyShow(cmd *cobra.Command, policyName, version, format string) error
 		return fmt.Errorf("policy %s not found in %s", policyName, policyPath)
 	}
 
-	out := cmd.OutOrStdout()
+	out := logging.Writer()
 	switch format {
 	case "json":
 		data, err := json.MarshalIndent(resources[0].Object, "", "  ")
@@ -452,7 +462,7 @@ func runPolicyShow(cmd *cobra.Command, policyName, version, format string) error
 }
 
 func renderPolicySummary(cmd *cobra.Command, index policiesIndex, version, format string) error {
-	out := cmd.OutOrStdout()
+	out := logging.Writer()
 	root, err := config.PolicyVersionDir(version)
 	if err != nil {
 		return err

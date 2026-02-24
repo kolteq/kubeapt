@@ -165,6 +165,13 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid output format %s, expected table or json", outputFormat)
 	}
 
+	if err := logging.Init(logFile, logLevelProvider()); err != nil {
+		return err
+	}
+	defer logging.Close()
+	logging.SetOutputWriter(cmd.ErrOrStderr())
+	logging.SetReportWriter(cmd.OutOrStdout())
+
 	if bundleName != "" && (policyFile != "" || bindingFile != "" || policyName != "") {
 		return fmt.Errorf("--bundle cannot be combined with --policies, --policy-name, or --bindings")
 	}
@@ -180,7 +187,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 
 	if !ignoreBindings && bindingFile == "" && (policyFile != "" || policyName != "") {
 		ignoreBindings = true
-		fmt.Fprintln(cmd.ErrOrStderr(), "No bindings provided, enabling --ignore-bindings")
+		logging.Warnf("No bindings provided, enabling --ignore-bindings")
 	}
 
 	psaLevel := strings.ToLower(strings.TrimSpace(psaLevelInput))
@@ -230,13 +237,8 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		namespaces = []string{kubernetes.ActiveNamespace()}
 	}
 
-	if err := logging.Init(logFile, logLevelProvider()); err != nil {
-		return err
-	}
-	defer logging.Close()
-
 	progressEnabled := true
-	writer := io.Writer(os.Stdout)
+	writer := logging.Writer()
 	tableStyle := table.StyleRounded
 	useColor := true
 	if outputPath != "" {
@@ -245,11 +247,13 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to open output file: %w", err)
 		}
 		defer f.Close()
-		writer = f
+		logging.SetReportWriter(f)
+		writer = logging.Writer()
 		tableStyle = table.StyleDefault
 		useColor = false
+		progressEnabled = false
 	}
-	if outputFormat == "json" && outputPath == "" {
+	if outputFormat == "json" {
 		progressEnabled = false
 	}
 
@@ -978,7 +982,7 @@ func startProgress(message string, total int64, enabled bool) (*progress.Tracker
 		return tracker, func() {}
 	}
 	pw := progress.NewWriter()
-	pw.SetOutputWriter(os.Stdout)
+	pw.SetOutputWriter(logging.Writer())
 	pw.SetAutoStop(false)
 	pw.SetTrackerLength(40)
 	pw.SetSortBy(progress.SortByNone)
@@ -994,7 +998,7 @@ func startProgress(message string, total int64, enabled bool) (*progress.Tracker
 	stop := func() {
 		tracker.MarkAsDone()
 		pw.Stop()
-		fmt.Println()
+		logging.Newline()
 	}
 	return tracker, stop
 }
