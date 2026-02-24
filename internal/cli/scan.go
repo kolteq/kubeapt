@@ -6,7 +6,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -22,6 +21,7 @@ import (
 
 	"github.com/kolteq/kubeapt/internal/config"
 	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/logging"
 )
 
 const ()
@@ -30,7 +30,15 @@ func ScanCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan the connected cluster for admission safeguards",
-		RunE:  runScan,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := logging.Init("", getLogLevel()); err != nil {
+				return err
+			}
+			logging.SetOutputWriter(cmd.OutOrStdout())
+			logging.SetReportWriter(cmd.OutOrStdout())
+			return nil
+		},
+		RunE: runScan,
 	}
 	return cmd
 }
@@ -41,22 +49,25 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	fmt.Println("[1/4] Inspecting namespaces and admission controllers...")
+	logging.Infof("[1/4] Inspecting namespaces and admission controllers...")
 	if err := reportPSAAndPolicies(clientset); err != nil {
 		return err
 	}
 
-	fmt.Println("\n[2/4] Inspecting built-in admission plugins...")
+	logging.Newline()
+	logging.Infof("[2/4] Inspecting built-in admission plugins...")
 	if err := reportBuiltInAdmissionControllers(clientset); err != nil {
 		return err
 	}
 
-	fmt.Println("\n[3/4] Inspecting registered webhooks...")
+	logging.Newline()
+	logging.Infof("[3/4] Inspecting registered webhooks...")
 	if err := reportWebhooks(clientset); err != nil {
 		return err
 	}
 
-	fmt.Println("\n[4/4] Checking policy updates...")
+	logging.Newline()
+	logging.Infof("[4/4] Checking policy updates...")
 	if err := reportPolicyUpdates(cmd); err != nil {
 		return err
 	}
@@ -65,8 +76,6 @@ func runScan(cmd *cobra.Command, _ []string) error {
 }
 
 func reportPolicyUpdates(cmd *cobra.Command) error {
-	out := cmd.OutOrStdout()
-
 	bundlesLocal, err := localBundleIndex()
 	if err != nil {
 		return err
@@ -131,25 +140,25 @@ func reportPolicyUpdates(cmd *cobra.Command) error {
 	}
 
 	if len(bundleUpdates) == 0 && len(installedUpdates) == 0 && policyUpdate == "" {
-		fmt.Fprintln(out, "All bundles and policies are up to date.")
+		logging.Infof("All bundles and policies are up to date.")
 		return nil
 	}
 
 	if len(bundleUpdates) > 0 {
-		fmt.Fprintln(out, "Bundle updates available:")
+		logging.Infof("Bundle updates available:")
 		for _, line := range bundleUpdates {
-			fmt.Fprintf(out, "  - %s (run `kubeapt bundles download <bundle-name>`)\n", line)
+			logging.Infof("  - %s (run `kubeapt bundles download <bundle-name>`)", line)
 		}
 	}
 	if len(installedUpdates) > 0 {
-		fmt.Fprintln(out, "Installed bundle updates available:")
+		logging.Infof("Installed bundle updates available:")
 		for _, line := range installedUpdates {
-			fmt.Fprintf(out, "  - %s\n", line)
+			logging.Infof("  - %s", line)
 		}
 	}
 	if policyUpdate != "" {
-		fmt.Fprintln(out, "Policy updates available:")
-		fmt.Fprintf(out, "  - %s (run `kubeapt policies download`)\n", policyUpdate)
+		logging.Infof("Policy updates available:")
+		logging.Infof("  - %s (run `kubeapt policies download`)", policyUpdate)
 	}
 	return nil
 }
@@ -287,32 +296,32 @@ func reportPSAAndPolicies(clientset *kubeclient.Clientset) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Policy bundle %s not found in %s. Run `kubeapt bundles download %s` to install.\n", bundleName, root, bundleName)
+		logging.Warnf("Policy bundle %s not found in %s. Run `kubeapt bundles download %s` to install.", bundleName, root, bundleName)
 	}
 
 	results, usesKolteqLabels := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
-	printPSATable(results, usesKolteqLabels, os.Stdout, table.StyleRounded)
-	fmt.Fprintln(os.Stdout, "For details run `kubeapt validate --bundle pod-security-admission --psa-level <baseline|restricted> --all-namespaces --report all`")
-	fmt.Fprintln(os.Stdout)
+	printPSATable(results, usesKolteqLabels, logging.Writer(), table.StyleRounded)
+	logging.Infof("For details run `kubeapt validate --bundle pod-security-admission --psa-level <baseline|restricted> --all-namespaces --report all`")
+	logging.Newline()
 
 	policies, err = kubernetes.ListValidatingAdmissionPolicies()
 	if err != nil {
-		fmt.Printf("Error fetching ValidatingAdmissionPolicies: %v\n", err)
+		logging.Warnf("Error fetching ValidatingAdmissionPolicies: %v", err)
 	} else if len(policies) > 0 {
-		fmt.Printf("ValidatingAdmissionPolicies present: %d\n", len(policies))
+		logging.Infof("ValidatingAdmissionPolicies present: %d", len(policies))
 	} else {
-		fmt.Println("No ValidatingAdmissionPolicies detected.")
+		logging.Infof("No ValidatingAdmissionPolicies detected.")
 	}
 
 	kyverno, gatekeeper := detectThirdPartyAdmissionControllers(clientset)
 	if kyverno {
-		fmt.Println("Kyverno detected in cluster")
+		logging.Infof("Kyverno detected in cluster")
 	}
 	if gatekeeper {
-		fmt.Println("OPA Gatekeeper detected in cluster")
+		logging.Infof("OPA Gatekeeper detected in cluster")
 	}
 	if !kyverno && !gatekeeper {
-		fmt.Println("No Kyverno/Gatekeeper controllers detected.")
+		logging.Infof("No Kyverno/Gatekeeper controllers detected.")
 	}
 
 	return nil
@@ -389,15 +398,15 @@ func reportBuiltInAdmissionControllers(clientset *kubeclient.Clientset) error {
 	}
 
 	if len(enabled) == 0 {
-		fmt.Println("Could not determine enabled admission plugins (kube-apiserver pod not found or flags missing).")
+		logging.Warnf("Could not determine enabled admission plugins (kube-apiserver pod not found or flags missing).")
 		return nil
 	}
 
-	fmt.Println("Enabled admission plugins:")
-	fmt.Println(strings.Join(sortedKeys(enabled), ", "))
+	logging.Infof("Enabled admission plugins:")
+	logging.Infof("%s", strings.Join(sortedKeys(enabled), ", "))
 	if len(disabled) > 0 {
-		fmt.Println("Disabled admission plugins:")
-		fmt.Println(strings.Join(sortedKeys(disabled), ", "))
+		logging.Infof("Disabled admission plugins:")
+		logging.Infof("%s", strings.Join(sortedKeys(disabled), ", "))
 	}
 
 	return nil
@@ -425,13 +434,13 @@ func reportWebhooks(clientset *kubeclient.Clientset) error {
 	if len(validating.Items) > 0 {
 		printWebhookTable("Validating Webhook Configurations", validatingWebhookRows(validating.Items))
 	} else {
-		fmt.Println("No ValidatingWebhookConfigurations found.")
+		logging.Infof("No ValidatingWebhookConfigurations found.")
 	}
 
 	if len(mutating.Items) > 0 {
 		printWebhookTable("Mutating Webhook Configurations", mutatingWebhookRows(mutating.Items))
 	} else {
-		fmt.Println("No MutatingWebhookConfigurations found.")
+		logging.Infof("No MutatingWebhookConfigurations found.")
 	}
 
 	return nil
@@ -439,7 +448,7 @@ func reportWebhooks(clientset *kubeclient.Clientset) error {
 
 func printWebhookTable(title string, rows []table.Row) {
 	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
+	t.SetOutputMirror(logging.Writer())
 	t.SetStyle(table.StyleRounded)
 	t.Style().Title.Align = text.AlignLeft
 	t.SetTitle(title)
@@ -447,7 +456,7 @@ func printWebhookTable(title string, rows []table.Row) {
 	for _, row := range rows {
 		t.AppendRow(row)
 	}
-	fmt.Println()
+	logging.Newline()
 	t.Render()
 }
 

@@ -39,6 +39,7 @@ import (
 
 	"github.com/kolteq/kubeapt/internal/config"
 	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/kolteq/kubeapt/internal/logging"
 )
 
 const (
@@ -55,6 +56,14 @@ func BundleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bundles",
 		Short: "Manage policy bundles",
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := logging.Init("", getLogLevel()); err != nil {
+				return err
+			}
+			logging.SetOutputWriter(cmd.OutOrStdout())
+			logging.SetReportWriter(cmd.OutOrStdout())
+			return nil
+		},
 	}
 	cmd.AddCommand(newBundleDownloadCmd())
 	cmd.AddCommand(newBundleInstallCmd())
@@ -305,7 +314,7 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 			if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), namespaceObj, metav1.UpdateOptions{}); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s from namespace %s\n", targetKey, namespaceName)
+			logging.Infof("Removed %s from namespace %s", targetKey, namespaceName)
 			continue
 		}
 
@@ -320,7 +329,7 @@ func runBundleNamespaceLabel(cmd *cobra.Command, mode, bundleArg string) error {
 		if _, err := clientset.CoreV1().Namespaces().Update(context.TODO(), namespaceObj, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Set %s=%s on namespace %s\n", targetKey, labels[targetKey], namespaceName)
+		logging.Infof("Set %s=%s on namespace %s", targetKey, labels[targetKey], namespaceName)
 	}
 
 	return nil
@@ -435,7 +444,7 @@ func runBundleDownload(cmd *cobra.Command, bundleName, version string) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Downloaded bundle %s %s to %s\n", bundleName, resolvedVersion, dest)
+	logging.Infof("Downloaded bundle %s %s to %s", bundleName, resolvedVersion, dest)
 	return nil
 }
 
@@ -451,7 +460,7 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		return err
 	}
 	if len(bundles) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No bundles found.")
+		logging.Infof("No bundles found.")
 		return nil
 	}
 
@@ -462,14 +471,17 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 	installedIndex := map[string]map[string]struct{}{}
 	if !local {
 		index, err := installedBundleVersionIndex(cmd.Context())
-		if err != nil {
+		// Check if connection was refused
+		if err != nil && strings.Contains(err.Error(), "connection refused") {
+			logging.Warnf("Unable to connect to Kubernetes cluster to check installed bundles.")
+		} else if err != nil {
 			return err
 		}
 		installedIndex = index
 	}
 
 	t := table.NewWriter()
-	t.SetOutputMirror(cmd.OutOrStdout())
+	t.SetOutputMirror(logging.Writer())
 	t.SetStyle(table.StyleRounded)
 	t.AppendHeader(table.Row{"Bundle", "Latest", "Versions", "Downloaded", "Installed"})
 	for _, bundle := range bundles {
@@ -514,7 +526,8 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		t.AppendRow(table.Row{bundle.Name, latest, versions, downloaded, installed})
 	}
 	t.Render()
-	fmt.Fprintln(cmd.OutOrStdout(), "\nLegend: x = version is downloaded/installed")
+	logging.Newline()
+	logging.Infof("Legend: x = version is downloaded/installed")
 
 	return nil
 }
@@ -651,7 +664,7 @@ func runBundleShow(cmd *cobra.Command, bundleName, version, format string) error
 		return err
 	}
 
-	out := cmd.OutOrStdout()
+	out := logging.Writer()
 	switch format {
 	case "json":
 		resources, err := loadUnstructuredResources([]string{policiesPath, bindingsPath})
@@ -1080,9 +1093,9 @@ func deployBundleResources(cmd *cobra.Command, bundleName, version string, insta
 			return err
 		}
 		if dryRun {
-			fmt.Fprintf(cmd.OutOrStdout(), "Dry run: install bundle %s %s\n", bundleName, version)
+			logging.Infof("Dry run: install bundle %s %s", bundleName, version)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "Installed bundle %s %s\n", bundleName, version)
+			logging.Infof("Installed bundle %s %s", bundleName, version)
 		}
 		return nil
 	}
@@ -1090,9 +1103,9 @@ func deployBundleResources(cmd *cobra.Command, bundleName, version string, insta
 		return err
 	}
 	if dryRun {
-		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: uninstall bundle %s %s\n", bundleName, version)
+		logging.Infof("Dry run: uninstall bundle %s %s", bundleName, version)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "Uninstalled bundle %s %s\n", bundleName, version)
+		logging.Infof("Uninstalled bundle %s %s", bundleName, version)
 	}
 	return nil
 }
