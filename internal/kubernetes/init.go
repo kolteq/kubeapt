@@ -4,6 +4,8 @@
 package kubernetes
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +20,31 @@ var (
 	activeNamespace = "default"
 	warningsOnce    sync.Once
 )
+
+var ErrKubeconfigNotFound = errors.New("kubeconfig not found")
+
+type KubeconfigNotFoundError struct {
+	Path string
+	Err  error
+}
+
+func (e KubeconfigNotFoundError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	if e.Path != "" {
+		return fmt.Sprintf("kubeconfig not found: %s", e.Path)
+	}
+	return ErrKubeconfigNotFound.Error()
+}
+
+func (e KubeconfigNotFoundError) Unwrap() error {
+	return e.Err
+}
+
+func (e KubeconfigNotFoundError) Is(target error) bool {
+	return target == ErrKubeconfigNotFound
+}
 
 func SetKubeconfig(path string) {
 	if path == "" {
@@ -42,6 +69,9 @@ func RESTConfig() (*rest.Config, error) {
 	if kubeconfigPath != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+				return nil, KubeconfigNotFoundError{Path: kubeconfigPath, Err: err}
+			}
 			return nil, err
 		}
 		activeNamespace = detectNamespace(kubeconfigPath)
@@ -56,6 +86,9 @@ func RESTConfig() (*rest.Config, error) {
 		kubeconfig := loadingRules.GetDefaultFilename()
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+				return nil, KubeconfigNotFoundError{Path: kubeconfig, Err: err}
+			}
 			return nil, err
 		}
 		kubeconfigPath = kubeconfig

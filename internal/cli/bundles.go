@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -472,7 +473,9 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 	if !local {
 		index, err := installedBundleVersionIndex(cmd.Context())
 		// Check if connection was refused
-		if err != nil && strings.Contains(err.Error(), "connection refused") {
+		if err != nil && errors.Is(err, kubernetes.ErrKubeconfigNotFound) {
+			logging.Warnf("%v", err)
+		} else if err != nil && strings.Contains(err.Error(), "connection refused") {
 			logging.Warnf("Unable to connect to Kubernetes cluster to check installed bundles.")
 		} else if err != nil {
 			return err

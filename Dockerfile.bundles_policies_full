@@ -7,14 +7,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kubeapt ./main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kubeapt ./cmd/kubeapt/
+
+RUN /out/kubeapt bundles download kolteq-best-practices --version v0.1.0
+RUN /out/kubeapt bundles download pod-security-admission --version v1.34.0
+RUN /out/kubeapt policies download --version v0.1.0
 
 FROM gcr.io/distroless/static-debian12
 
 COPY --from=builder /out/kubeapt /usr/local/bin/kubeapt
-
-RUN kubeapt bundles download kolteq-best-practices --version v0.1.0
-RUN kubeapt bundles download pod-secuity-admission --version v1.34.0
-RUN kubeapt policies download --version v0.1.0
+COPY --from=builder /root/.config/kubeapt /root/.config/kubeapt
 
 ENTRYPOINT ["/usr/local/bin/kubeapt"]
