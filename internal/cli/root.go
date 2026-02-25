@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -34,7 +35,11 @@ func Execute() {
 		if initErr := logging.Init("", getLogLevel()); initErr == nil {
 			logging.SetOutputWriter(rootCmd.ErrOrStderr())
 		}
-		logging.Errorf("%v", err)
+		if errors.Is(err, kubernetes.ErrKubeconfigNotFound) {
+			logging.Warnf("%v", err)
+		} else {
+			logging.Errorf("%v", err)
+		}
 		os.Exit(1)
 	}
 }
