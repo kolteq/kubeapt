@@ -24,6 +24,24 @@ go run ./cmd/kubeapt <command>
 
 ## Docker
 
+### Pull and run
+
+There are three docker images available.
+
+- `registry.kolteq.com/kubeapt/kubeapt:<latest/version>`
+- `registry.kolteq.com/kubeapt/kubeapt-bundles_policies_latest:<latest/version>`
+- `registry.kolteq.com/kubeapt/kubeapt-bundles_policies_full:<latest/version>`
+
+Choose your image and run it.
+
+```bash
+docker run -it --rm --name kubeapt --net=host \
+  -v <PATH_TO_KUBECONFIG>:<PATH_TO_KUBECONFIG> \
+  kubeapt --kubeconfig <PATH_TO_KUBECONFIG> <command>
+```
+
+### Build from source
+
 ```bash
 docker build -t kubeapt .
 docker run -it --rm --name kubeapt --net=host \
