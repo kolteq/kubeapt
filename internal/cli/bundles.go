@@ -51,6 +51,7 @@ type bundleIndexEntry struct {
 	Name          string   `json:"name"`
 	LatestVersion string   `json:"latest-version"`
 	Versions      []string `json:"versions"`
+	LocalOnly     bool     `json:"-"`
 }
 
 func BundleCmd() *cobra.Command {
@@ -452,14 +453,30 @@ func runBundleDownload(cmd *cobra.Command, bundleName, version string) error {
 func runBundleList(cmd *cobra.Command, local bool) error {
 	var bundles []bundleIndexEntry
 	var err error
+	var remoteBundles []bundleIndexEntry
+	var remoteErr error
 	if local {
 		bundles, err = localBundleIndex()
+		if err == nil {
+			remoteBundles, remoteErr = fetchBundleIndex(cmd.Context(), bundleIndexURL)
+		}
 	} else {
-		bundles, err = fetchBundleIndex(cmd.Context(), bundleIndexURL)
+		remoteBundles, err = fetchBundleIndex(cmd.Context(), bundleIndexURL)
+		if err != nil {
+			return err
+		}
+		localBundles, errLocal := localBundleIndex()
+		if errLocal != nil {
+			return errLocal
+		}
+		bundles = mergeBundleIndexes(remoteBundles, localBundles)
 	}
 	if err != nil {
 		return err
 	}
+
+	bundles = markBundleOrigins(bundles, remoteBundles, remoteErr == nil)
+
 	if len(bundles) == 0 {
 		logging.Infof("No bundles found.")
 		return nil
@@ -486,8 +503,12 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 	t := table.NewWriter()
 	t.SetOutputMirror(logging.Writer())
 	t.SetStyle(table.StyleRounded)
-	t.AppendHeader(table.Row{"Bundle", "Latest", "Versions", "Downloaded", "Installed"})
+	t.AppendHeader(table.Row{"Bundle", "Origin", "Latest", "Versions", "Downloaded", "Installed"})
 	for _, bundle := range bundles {
+		origin := "remote"
+		if bundle.LocalOnly {
+			origin = "local-only"
+		}
 		latest := bundle.LatestVersion
 		if latest == "" {
 			latest = "-"
@@ -526,7 +547,7 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 			downloaded = strings.Join(downloadedLines, "\n")
 			installed = strings.Join(installedLines, "\n")
 		}
-		t.AppendRow(table.Row{bundle.Name, latest, versions, downloaded, installed})
+		t.AppendRow(table.Row{bundle.Name, origin, latest, versions, downloaded, installed})
 	}
 	t.Render()
 	logging.Newline()
@@ -897,11 +918,11 @@ func syncBundleIndexCache(data []byte) error {
 func readBundleManifest(path string) (bundleManifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return bundleManifest{}, err
+		return bundleManifest{}, fmt.Errorf("read bundle manifest %s: %w", path, err)
 	}
 	var manifest bundleManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return bundleManifest{}, err
+		return bundleManifest{}, fmt.Errorf("parse bundle manifest %s: %w", path, err)
 	}
 	return manifest, nil
 }
@@ -1010,41 +1031,52 @@ func ensureBundleVersionAvailable(cmd *cobra.Command, bundleName, version string
 		if ok {
 			return version, nil
 		}
-		if err := runBundleDownload(cmd, bundleName, version); err != nil {
-			return "", err
+		remoteIndex, errIndex := fetchBundleIndex(cmd.Context(), bundleIndexURL)
+		if errIndex == nil {
+			if entry, ok := findBundleIndexEntry(remoteIndex, bundleName); ok && bundleVersionInIndex(entry, version) {
+				if err := runBundleDownload(cmd, bundleName, version); err != nil {
+					return "", err
+				}
+				return version, nil
+			}
 		}
-		return version, nil
+		return "", fmt.Errorf("bundle %s version %s is not available locally", bundleName, version)
 	}
 
-	bundles, err := fetchBundleIndex(cmd.Context(), bundleIndexURL)
-	if err != nil {
-		return "", err
-	}
-	latest, err := resolveBundleVersionFromIndex(bundles, bundleName, "")
+	localVersions, err := config.BundleVersions(bundleName)
 	if err != nil {
 		return "", err
 	}
 
-	ok, err := bundleVersionExists(bundleName, latest)
-	if err != nil {
-		return "", err
-	}
-	if ok {
-		return latest, nil
-	}
-
-	installed, err := config.BundleVersions(bundleName)
-	if err != nil {
-		return "", err
-	}
-	if len(installed) == 0 {
-		if err := runBundleDownload(cmd, bundleName, latest); err != nil {
-			return "", err
+	bundles, indexErr := fetchBundleIndex(cmd.Context(), bundleIndexURL)
+	if indexErr == nil {
+		if latest, err := resolveBundleVersionFromIndex(bundles, bundleName, ""); err == nil {
+			ok, errExists := bundleVersionExists(bundleName, latest)
+			if errExists != nil {
+				return "", errExists
+			}
+			if ok {
+				return latest, nil
+			}
+			if err := runBundleDownload(cmd, bundleName, latest); err != nil {
+				return "", err
+			}
+			return latest, nil
 		}
-		return latest, nil
 	}
 
-	return "", fmt.Errorf("latest version %s for bundle %s is not downloaded; run `kubeapt bundles download %s` or use --version", latest, bundleName, bundleName)
+	if len(localVersions) > 0 {
+		return localVersions[len(localVersions)-1], nil
+	}
+
+	if indexErr != nil {
+		return "", fmt.Errorf("bundle %s not found locally and bundle index could not be fetched: %w", bundleName, indexErr)
+	}
+	root, err := config.BundleDir(bundleName)
+	if err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("bundle %s is not available; add it under %s or download it", bundleName, root)
 }
 
 func bundleVersionExists(bundleName, version string) (bool, error) {
@@ -1222,14 +1254,84 @@ func localBundleIndex() ([]bundleIndexEntry, error) {
 			return nil, err
 		}
 		bundles = append(bundles, bundleIndexEntry{
-			Name:     name,
-			Versions: versions,
+			Name:          name,
+			Versions:      versions,
+			LatestVersion: latestVersion(versions),
+			LocalOnly:     true,
 		})
 	}
 	sort.Slice(bundles, func(i, j int) bool {
 		return bundles[i].Name < bundles[j].Name
 	})
 	return bundles, nil
+}
+
+func mergeBundleIndexes(remote, local []bundleIndexEntry) []bundleIndexEntry {
+	merged := make(map[string]*bundleIndexEntry, len(remote)+len(local))
+	for _, b := range remote {
+		copy := b
+		copy.LocalOnly = false
+		merged[b.Name] = &copy
+	}
+	for _, b := range local {
+		existing, ok := merged[b.Name]
+		if !ok {
+			copy := b
+			if copy.LatestVersion == "" {
+				copy.LatestVersion = latestVersion(copy.Versions)
+			}
+			copy.LocalOnly = true
+			merged[b.Name] = &copy
+			continue
+		}
+		versionSet := make(map[string]struct{}, len(existing.Versions)+len(b.Versions))
+		for _, v := range existing.Versions {
+			versionSet[v] = struct{}{}
+		}
+		for _, v := range b.Versions {
+			if _, ok := versionSet[v]; ok {
+				continue
+			}
+			existing.Versions = append(existing.Versions, v)
+			versionSet[v] = struct{}{}
+		}
+		sort.Strings(existing.Versions)
+		if existing.LatestVersion == "" {
+			existing.LatestVersion = latestVersion(existing.Versions)
+		}
+		existing.LocalOnly = false
+	}
+
+	out := make([]bundleIndexEntry, 0, len(merged))
+	for _, entry := range merged {
+		if entry.LatestVersion == "" {
+			entry.LatestVersion = latestVersion(entry.Versions)
+		}
+		// keep LocalOnly as set above
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func markBundleOrigins(bundles, remote []bundleIndexEntry, remoteOK bool) []bundleIndexEntry {
+	if !remoteOK {
+		return bundles
+	}
+	remoteSet := make(map[string]struct{}, len(remote))
+	for _, b := range remote {
+		remoteSet[b.Name] = struct{}{}
+	}
+	for i := range bundles {
+		if _, ok := remoteSet[bundles[i].Name]; ok {
+			bundles[i].LocalOnly = false
+		} else {
+			bundles[i].LocalOnly = true
+		}
+	}
+	return bundles
 }
 
 func validateBundleSegment(label, value string) error {

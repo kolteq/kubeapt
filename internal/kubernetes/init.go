@@ -29,13 +29,11 @@ type KubeconfigNotFoundError struct {
 }
 
 func (e KubeconfigNotFoundError) Error() string {
-	if e.Err != nil {
-		return e.Err.Error()
-	}
+	base := "kubeconfig not found"
 	if e.Path != "" {
-		return fmt.Sprintf("kubeconfig not found: %s", e.Path)
+		base = fmt.Sprintf("%s: %s", base, e.Path)
 	}
-	return ErrKubeconfigNotFound.Error()
+	return fmt.Sprintf("%s; set KUBECONFIG or place a config in ~/.kube/config", base)
 }
 
 func (e KubeconfigNotFoundError) Unwrap() error {
@@ -63,13 +61,26 @@ func RESTConfig() (*rest.Config, error) {
 		rest.SetDefaultWarningHandler(rest.NoWarnings{})
 	})
 
+	isMissingConfig := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+			return true
+		}
+		if clientcmd.IsEmptyConfig(err) {
+			return true
+		}
+		return false
+	}
+
 	var config *rest.Config
 	var err error
 
 	if kubeconfigPath != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+			if isMissingConfig(err) {
 				return nil, KubeconfigNotFoundError{Path: kubeconfigPath, Err: err}
 			}
 			return nil, err
@@ -86,7 +97,7 @@ func RESTConfig() (*rest.Config, error) {
 		kubeconfig := loadingRules.GetDefaultFilename()
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+			if isMissingConfig(err) {
 				return nil, KubeconfigNotFoundError{Path: kubeconfig, Err: err}
 			}
 			return nil, err
