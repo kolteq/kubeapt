@@ -1262,8 +1262,6 @@ func buildPolicyJSONReport(reportMode string, reports []*bindingReport, resource
 	}
 	for _, br := range reports {
 		copyReport := *br
-		copyReport.Binding = ""
-		copyReport.Mode = ""
 		if reportMode != "all" {
 			copyReport.Violations = nil
 		}
@@ -1539,7 +1537,7 @@ func printSummaryTables(reports []*bindingReport, w io.Writer, style table.Style
 	t.AppendHeader(table.Row{"Policy", "Binding", "Mode", "Total", "Compliant", "NonCompliant"})
 	var totalTotal, totalCompliant, totalNon int
 	for _, br := range reports {
-		t.AppendRow(table.Row{br.Policy, "", "", br.Total, br.Compliant, br.NonCompliant})
+		t.AppendRow(table.Row{br.Policy, br.Binding, br.Mode, br.Total, br.Compliant, br.NonCompliant})
 		totalTotal += br.Total
 		totalCompliant += br.Compliant
 		totalNon += br.NonCompliant
