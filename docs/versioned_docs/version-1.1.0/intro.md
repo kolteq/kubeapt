@@ -15,9 +15,7 @@ KubeAPT validates VAP policies and bindings against Kubernetes resources with CE
 
 - CI/CD: use `validate --pipeline` to fail builds on violations.
 - Security reviews: generate human readable tables or machine readable JSON reports.
-- Day-2 operations: scan clusters for admission hardening.
-- Air-gapped environments: install bundles from a portable `.tar.gz` and run scan/validate with no outbound network. See [Air-gapped installs](./air-gapped.md).
-- Other Go programs: embed the scanner in-process via the `pkg/scanner` and `pkg/policies` packages. See [Embedding KubeAPT](./embedding.md).
+- Day-2 operations: scan clusters for admission hardening and stay current on policy updates.
 
 ## Output in brief
 

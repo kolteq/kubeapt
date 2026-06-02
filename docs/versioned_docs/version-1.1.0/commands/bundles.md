@@ -17,8 +17,6 @@ kubeapt bundles <command> [flags]
 | Command | Description |
 | --- | --- |
 | `download` | Download a policy bundle |
-| `export` | Export an installed bundle as a portable `.tar.gz` (offline / air-gapped transfer) |
-| `import` | Install a policy bundle from a local `.tar.gz` archive (offline / air-gapped) |
 | `install` | Install a policy bundle into the cluster |
 | `list` | List available policy bundles and versions |
 | `audit` | Set the bundle audit label on a namespace |
