@@ -4,9 +4,7 @@ title: kubeapt scan
 
 # kubeapt scan
 
-Scan the connected cluster for admission safeguards, including namespace PSA posture, built-in admission plugins, and registered webhooks. Run it against the current kubeconfig context.
-
-`scan` does not reach outside the cluster — there are no outbound HTTP calls, so it is safe to run on air-gapped or restricted-network hosts.
+Scan the connected cluster for admission safeguards, webhooks, and policy updates. Run it against the current kubeconfig context.
 
 ## Usage
 
