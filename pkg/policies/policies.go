@@ -9,6 +9,7 @@ package policies
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,10 +32,22 @@ import (
 // ValidatingAdmissionPolicy documents in the bundle share a metadata.name.
 var ErrDuplicatePolicy = errors.New("policies: duplicate policy id")
 
-// policyAnnotationSeverity is the annotation key kubeapt uses to declare a
-// policy's severity. The value is normalized to one of the types.Severity
-// constants; unknown or missing values map to types.SeverityNotRated.
-const policyAnnotationSeverity = "security.kubeapt.io/severity"
+// Annotation keys read from a parsed ValidatingAdmissionPolicy's metadata.
+//
+// The kubeapt-namespaced keys are checked first; the Kyverno community keys
+// act as a fallback so bundles authored against either convention surface
+// useful metadata. Unknown or missing values cause Title to fall back to
+// the policy ID and Description/Category to return the empty string.
+const (
+	policyAnnotationSeverity    = "security.kubeapt.io/severity"
+	policyAnnotationDisplayName = "security.kubeapt.io/displayName"
+	policyAnnotationDescription = "security.kubeapt.io/description"
+	policyAnnotationCategory    = "security.kubeapt.io/category"
+
+	kyvernoAnnotationTitle       = "policies.kyverno.io/title"
+	kyvernoAnnotationDescription = "policies.kyverno.io/description"
+	kyvernoAnnotationCategory    = "policies.kyverno.io/category"
+)
 
 // Policy is a sealed handle to one ValidatingAdmissionPolicy in a Bundle.
 //
@@ -58,10 +71,60 @@ func (p *Policy) Parsed(_ scanaccess.Token) *scanaccess.Parsed {
 	return p.parsed
 }
 
+// Title returns a human-readable display name for the policy, looked up in
+// the parsed VAP's annotations. It prefers the kubeapt key
+// (security.kubeapt.io/displayName), falls back to the Kyverno community key
+// (policies.kyverno.io/title), and finally to ID so the caller always
+// receives a non-empty string.
+func (p *Policy) Title() string {
+	if v := p.lookupAnnotation(policyAnnotationDisplayName, kyvernoAnnotationTitle); v != "" {
+		return v
+	}
+	return p.ID
+}
+
+// Description returns the policy's human-readable description, looked up
+// under security.kubeapt.io/description, then policies.kyverno.io/description.
+// Returns "" if neither annotation is set.
+func (p *Policy) Description() string {
+	return p.lookupAnnotation(policyAnnotationDescription, kyvernoAnnotationDescription)
+}
+
+// Category returns the policy's category, useful for grouping policies in
+// catalog views. Looked up under security.kubeapt.io/category, then
+// policies.kyverno.io/category. Returns "" if neither annotation is set.
+func (p *Policy) Category() string {
+	return p.lookupAnnotation(policyAnnotationCategory, kyvernoAnnotationCategory)
+}
+
+// lookupAnnotation returns the first non-empty annotation value in keys
+// order, or "" if none are set. Safe to call on a *Policy whose sealed
+// parsed handle is nil (returns "").
+func (p *Policy) lookupAnnotation(keys ...string) string {
+	if p == nil || p.parsed == nil || p.parsed.VAP == nil {
+		return ""
+	}
+	ann := p.parsed.VAP.Annotations
+	for _, k := range keys {
+		if v := strings.TrimSpace(ann[k]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // Bundle is an iterable collection of *Policy keyed by ID.
+//
+// Bundle-level metadata (Name, Description, Version) comes from an optional
+// bundle.json at the loaded root; if no bundle.json is present, the metadata
+// methods return empty strings.
 type Bundle struct {
 	items []*Policy
 	byID  map[string]*Policy
+
+	name        string
+	description string
+	version     string
 }
 
 // Iterate yields every Policy in load order.
@@ -85,6 +148,18 @@ func (b *Bundle) Get(id string) (*Policy, bool) {
 func (b *Bundle) Len() int {
 	return len(b.items)
 }
+
+// Name returns the bundle's declared name from bundle.json, or "" if no
+// bundle.json was found at the bundle root.
+func (b *Bundle) Name() string { return b.name }
+
+// Description returns the bundle's declared description from bundle.json,
+// or "" if no bundle.json was found at the bundle root.
+func (b *Bundle) Description() string { return b.description }
+
+// Version returns the bundle's declared version from bundle.json, or "" if
+// no bundle.json was found at the bundle root.
+func (b *Bundle) Version() string { return b.version }
 
 // LoadDir is a convenience wrapper around Load that reads from the host
 // filesystem rooted at path.
@@ -207,7 +282,37 @@ func Load(fsys fs.FS, root string) (*Bundle, error) {
 		bundle.byID[pp.id] = policy
 	}
 
+	if err := loadBundleMetadata(fsys, root, bundle); err != nil {
+		return nil, err
+	}
+
 	return bundle, nil
+}
+
+// loadBundleMetadata populates Bundle.name/description/version from a
+// bundle.json sitting at the bundle root. Missing file is not an error;
+// malformed JSON is.
+func loadBundleMetadata(fsys fs.FS, root string, bundle *Bundle) error {
+	manifestPath := path.Join(root, "bundle.json")
+	data, err := fs.ReadFile(fsys, manifestPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("policies: read %s: %w", manifestPath, err)
+	}
+	var meta struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Version     string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return fmt.Errorf("policies: parse %s: %w", manifestPath, err)
+	}
+	bundle.name = strings.TrimSpace(meta.Name)
+	bundle.description = strings.TrimSpace(meta.Description)
+	bundle.version = strings.TrimSpace(meta.Version)
+	return nil
 }
 
 func collectYAMLFiles(fsys fs.FS, root string) ([]string, error) {
