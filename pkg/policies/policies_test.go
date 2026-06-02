@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -416,5 +417,72 @@ func TestBundleMetadata_MalformedJSONIsError(t *testing.T) {
 	}
 	if _, err := policies.Load(fsys, "."); err == nil {
 		t.Fatal("Load on malformed bundle.json = nil, want error")
+	}
+}
+
+func TestBundleLabelsAndSources_Populated(t *testing.T) {
+	fsys := fstest.MapFS{
+		"policies.yaml": {Data: []byte(policyHighSeverityYAML)},
+		"bundle.json": {Data: []byte(`{
+  "name": "pod-security-admission",
+  "version": "v1.36.0",
+  "labels": {
+    "audit":   "pss.security.kolteq.com/audit",
+    "enforce": "pss.security.kolteq.com/enforce",
+    "warn":    "pss.security.kolteq.com/warn"
+  },
+  "sources": [
+    "https://github.com/kolteq/kubernetes-security-policies/releases/download/vap_pod-security-admission@v1.36.0/pod-security-admission.tar.gz"
+  ]
+}`)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	labels := bundle.Labels()
+	if labels["audit"] != "pss.security.kolteq.com/audit" || labels["enforce"] != "pss.security.kolteq.com/enforce" || labels["warn"] != "pss.security.kolteq.com/warn" {
+		t.Errorf("Labels() = %v, want audit/enforce/warn keys", labels)
+	}
+	sources := bundle.Sources()
+	if len(sources) != 1 || !strings.HasSuffix(sources[0], "pod-security-admission.tar.gz") {
+		t.Errorf("Sources() = %v, want one .tar.gz URL", sources)
+	}
+}
+
+func TestBundleLabelsAndSources_NilWhenAbsent(t *testing.T) {
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyHighSeverityYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := bundle.Labels(); got != nil {
+		t.Errorf("Labels() = %v, want nil without bundle.json", got)
+	}
+	if got := bundle.Sources(); got != nil {
+		t.Errorf("Sources() = %v, want nil without bundle.json", got)
+	}
+}
+
+func TestBundleLabelsAndSources_DefensiveCopy(t *testing.T) {
+	fsys := fstest.MapFS{
+		"policies.yaml": {Data: []byte(policyHighSeverityYAML)},
+		"bundle.json": {Data: []byte(`{
+  "name": "b",
+  "labels": {"audit": "k1"},
+  "sources": ["s1"]
+}`)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Mutate the returned copies; subsequent reads must reflect the original.
+	bundle.Labels()["audit"] = "tampered"
+	bundle.Sources()[0] = "tampered"
+	if got := bundle.Labels()["audit"]; got != "k1" {
+		t.Errorf("Labels() mutation leaked back: got %q, want k1", got)
+	}
+	if got := bundle.Sources()[0]; got != "s1" {
+		t.Errorf("Sources() mutation leaked back: got %q, want s1", got)
 	}
 }

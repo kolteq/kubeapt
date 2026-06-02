@@ -115,9 +115,9 @@ func (p *Policy) lookupAnnotation(keys ...string) string {
 
 // Bundle is an iterable collection of *Policy keyed by ID.
 //
-// Bundle-level metadata (Name, Description, Version) comes from an optional
-// bundle.json at the loaded root; if no bundle.json is present, the metadata
-// methods return empty strings.
+// Bundle-level metadata (Name, Description, Version, Labels, Sources) comes
+// from an optional bundle.json at the loaded root; if no bundle.json is
+// present, the string getters return "" and Labels/Sources return nil.
 type Bundle struct {
 	items []*Policy
 	byID  map[string]*Policy
@@ -125,6 +125,8 @@ type Bundle struct {
 	name        string
 	description string
 	version     string
+	labels      map[string]string
+	sources     []string
 }
 
 // Iterate yields every Policy in load order.
@@ -160,6 +162,31 @@ func (b *Bundle) Description() string { return b.description }
 // Version returns the bundle's declared version from bundle.json, or "" if
 // no bundle.json was found at the bundle root.
 func (b *Bundle) Version() string { return b.version }
+
+// Labels returns the bundle's declared labels from bundle.json, or nil if
+// no bundle.json was found at the bundle root or the labels field was empty.
+// The returned map is a defensive copy; mutating it does not affect the
+// Bundle's internal state.
+func (b *Bundle) Labels() map[string]string {
+	if len(b.labels) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(b.labels))
+	for k, v := range b.labels {
+		out[k] = v
+	}
+	return out
+}
+
+// Sources returns the bundle's declared source URLs from bundle.json, or
+// nil if no bundle.json was found at the bundle root or the sources field
+// was empty. The returned slice is a defensive copy.
+func (b *Bundle) Sources() []string {
+	if len(b.sources) == 0 {
+		return nil
+	}
+	return append([]string(nil), b.sources...)
+}
 
 // LoadDir is a convenience wrapper around Load that reads from the host
 // filesystem rooted at path.
@@ -302,9 +329,11 @@ func loadBundleMetadata(fsys fs.FS, root string, bundle *Bundle) error {
 		return fmt.Errorf("policies: read %s: %w", manifestPath, err)
 	}
 	var meta struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Version     string `json:"version"`
+		Name        string            `json:"name"`
+		Description string            `json:"description"`
+		Version     string            `json:"version"`
+		Labels      map[string]string `json:"labels"`
+		Sources     []string          `json:"sources"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return fmt.Errorf("policies: parse %s: %w", manifestPath, err)
@@ -312,6 +341,15 @@ func loadBundleMetadata(fsys fs.FS, root string, bundle *Bundle) error {
 	bundle.name = strings.TrimSpace(meta.Name)
 	bundle.description = strings.TrimSpace(meta.Description)
 	bundle.version = strings.TrimSpace(meta.Version)
+	if len(meta.Labels) > 0 {
+		bundle.labels = make(map[string]string, len(meta.Labels))
+		for k, v := range meta.Labels {
+			bundle.labels[k] = v
+		}
+	}
+	if len(meta.Sources) > 0 {
+		bundle.sources = append([]string(nil), meta.Sources...)
+	}
 	return nil
 }
 
