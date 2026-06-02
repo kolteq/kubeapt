@@ -269,51 +269,30 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		if err := validateBundleSegment("bundle name", bundleName); err != nil {
 			return err
 		}
-		versionSource := "flag"
 		version := strings.TrimSpace(bundleVersion)
 		if version != "" {
 			if err := validateBundleSegment("bundle version", version); err != nil {
 				return err
 			}
 		} else {
-			versionSource = ""
-			bundles, indexErr := fetchBundleIndex(cmd.Context(), bundleIndexURL)
-			if indexErr == nil {
-				if resolved, err := resolveBundleVersionFromIndex(bundles, bundleName, ""); err == nil {
-					version = resolved
-					versionSource = "index"
-				}
+			versions, err := config.BundleVersions(bundleName)
+			if err != nil {
+				return err
 			}
-			if version == "" {
-				versions, err := config.BundleVersions(bundleName)
+			if len(versions) == 0 {
+				dir, err := config.BundleDir(bundleName)
 				if err != nil {
 					return err
 				}
-				if len(versions) > 0 {
-					version = versions[len(versions)-1]
-					versionSource = "local"
-				} else if indexErr != nil {
-					return fmt.Errorf("bundle %s is not available locally and bundle index could not be fetched: %v", bundleName, indexErr)
-				} else {
-					dir, err := config.BundleDir(bundleName)
-					if err != nil {
-						return err
-					}
-					return fmt.Errorf("bundle %s is not available; place it under %s or download it", bundleName, dir)
-				}
+				return fmt.Errorf("bundle %s is not installed; place it under %s or run `kubeapt bundles import --from <archive>`", bundleName, dir)
 			}
+			version = versions[len(versions)-1]
 		}
 		ok, err := bundleVersionExists(bundleName, version)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			switch {
-			case versionSource == "index" && bundleVersion == "":
-				return fmt.Errorf("latest version %s for bundle %s is not downloaded; run `kubeapt bundles download %s`", version, bundleName, bundleName)
-			case versionSource == "index":
-				return fmt.Errorf("bundle %s version %s is not downloaded; run `kubeapt bundles download %s --version %s`", bundleName, version, bundleName, version)
-			}
 			dir, err := config.BundleDir(bundleName)
 			if err != nil {
 				return err
