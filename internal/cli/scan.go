@@ -49,117 +49,23 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	logging.Infof("[1/4] Inspecting namespaces and admission controllers...")
+	logging.Infof("[1/3] Inspecting namespaces and admission controllers...")
 	if err := reportPSAAndPolicies(clientset); err != nil {
 		return err
 	}
 
 	logging.Newline()
-	logging.Infof("[2/4] Inspecting built-in admission plugins...")
+	logging.Infof("[2/3] Inspecting built-in admission plugins...")
 	if err := reportBuiltInAdmissionControllers(clientset); err != nil {
 		return err
 	}
 
 	logging.Newline()
-	logging.Infof("[3/4] Inspecting registered webhooks...")
+	logging.Infof("[3/3] Inspecting registered webhooks...")
 	if err := reportWebhooks(clientset); err != nil {
 		return err
 	}
 
-	logging.Newline()
-	logging.Infof("[4/4] Checking policy updates...")
-	if err := reportPolicyUpdates(cmd); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func reportPolicyUpdates(cmd *cobra.Command) error {
-	bundlesLocal, err := localBundleIndex()
-	if err != nil {
-		return err
-	}
-	bundlesRemote, err := fetchBundleIndex(cmd.Context(), bundleIndexURL)
-	if err != nil {
-		return err
-	}
-	remoteLatest := make(map[string]string, len(bundlesRemote))
-	for _, bundle := range bundlesRemote {
-		if bundle.Name != "" && bundle.LatestVersion != "" {
-			remoteLatest[bundle.Name] = bundle.LatestVersion
-		}
-	}
-
-	var bundleUpdates []string
-	for _, bundle := range bundlesLocal {
-		if len(bundle.Versions) == 0 {
-			continue
-		}
-		localLatest := latestVersion(bundle.Versions)
-		remote := remoteLatest[bundle.Name]
-		if remote != "" && remote != localLatest {
-			bundleUpdates = append(bundleUpdates, fmt.Sprintf("Bundle %s: %s -> %s", bundle.Name, localLatest, remote))
-		}
-	}
-
-	installedIndex, err := installedBundleVersionIndex(cmd.Context())
-	if err != nil {
-		return err
-	}
-	var installedUpdates []string
-	for bundleName, versions := range installedIndex {
-		var installed []string
-		for v := range versions {
-			installed = append(installed, v)
-		}
-		latestInstalled := latestVersion(installed)
-		remote := remoteLatest[bundleName]
-		if latestInstalled == "" || remote == "" {
-			continue
-		}
-		if isVersionNewer(remote, latestInstalled) {
-			installedUpdates = append(installedUpdates, fmt.Sprintf("Bundle %s: %s -> %s", bundleName, latestInstalled, remote))
-		}
-	}
-
-	policiesLocal, err := config.PolicyVersions()
-	if err != nil {
-		return err
-	}
-	policiesRemote, err := fetchPoliciesIndex(cmd.Context(), policiesIndexURL)
-	if err != nil {
-		return err
-	}
-	var policyUpdate string
-	if len(policiesLocal) > 0 && policiesRemote.LatestVersion != "" {
-		localLatest := policiesLocal[len(policiesLocal)-1]
-		if localLatest != policiesRemote.LatestVersion {
-			policyUpdate = fmt.Sprintf("Policies: %s -> %s", localLatest, policiesRemote.LatestVersion)
-		}
-	}
-
-	if len(bundleUpdates) == 0 && len(installedUpdates) == 0 && policyUpdate == "" {
-		logging.Infof("All bundles and policies are up to date.")
-		return nil
-	}
-
-	if len(bundleUpdates) > 0 {
-		logging.Infof("Bundle updates available:")
-		for _, line := range bundleUpdates {
-			logging.Infof("  - %s (run `kubeapt bundles download <bundle-name>`)", line)
-		}
-	}
-	if len(installedUpdates) > 0 {
-		logging.Infof("Installed bundle updates available:")
-		for _, line := range installedUpdates {
-			logging.Infof("  - %s", line)
-		}
-	}
-	if policyUpdate != "" {
-		logging.Infof("Policy updates available:")
-		logging.Infof("  - %s (run `kubeapt policies download`)", policyUpdate)
-	}
 	return nil
 }
 
@@ -185,15 +91,6 @@ func latestVersion(versions []string) string {
 	sorted := append([]string(nil), versions...)
 	sort.Strings(sorted)
 	return sorted[len(sorted)-1]
-}
-
-func isVersionNewer(latest, current string) bool {
-	latestParsed, errLatest := version.ParseSemantic(latest)
-	currentParsed, errCurrent := version.ParseSemantic(current)
-	if errLatest == nil && errCurrent == nil {
-		return latestParsed.GreaterThan(currentParsed)
-	}
-	return latest != current
 }
 
 func reportPSAAndPolicies(clientset *kubeclient.Clientset) error {

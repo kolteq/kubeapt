@@ -68,6 +68,8 @@ func BundleCmd() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newBundleDownloadCmd())
+	cmd.AddCommand(newBundleExportCmd())
+	cmd.AddCommand(newBundleImportCmd())
 	cmd.AddCommand(newBundleInstallCmd())
 	cmd.AddCommand(newBundleListCmd())
 	cmd.AddCommand(newBundleNamespaceLabelCmd("audit"))
