@@ -73,14 +73,14 @@ func TestBindingModeAndSeverity(t *testing.T) {
         t.Fatalf("unexpected mode: %q", got)
     }
 
-    if sev, _ := violationSeverityColor([]string{"Warn"}); sev != "warn" {
-        t.Fatalf("expected warn severity, got %q", sev)
+    if label, _ := violationSeverityLabel("high"); label != "HIGH" {
+        t.Fatalf("expected HIGH label, got %q", label)
     }
-    if sev, _ := violationSeverityColor([]string{"Deny"}); sev != "deny" {
-        t.Fatalf("expected deny severity, got %q", sev)
+    if label, _ := violationSeverityLabel("Critical"); label != "CRITICAL" {
+        t.Fatalf("expected CRITICAL label, got %q", label)
     }
-    if sev, _ := violationSeverityColor([]string{}); sev != "info" {
-        t.Fatalf("expected info severity, got %q", sev)
+    if label, _ := violationSeverityLabel(""); label != "NOT RATED" {
+        t.Fatalf("expected NOT RATED label, got %q", label)
     }
 }
 
