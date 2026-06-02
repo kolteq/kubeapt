@@ -41,6 +41,7 @@ var logLevelProvider func() string
 type violationDetail struct {
 	Policy   string   `json:"policy"`
 	Binding  string   `json:"binding"`
+	Severity string   `json:"severity"`
 	Resource string   `json:"resource"`
 	Message  string   `json:"message"`
 	Path     string   `json:"path"`
@@ -50,6 +51,7 @@ type violationDetail struct {
 type bindingReport struct {
 	Policy       string            `json:"policy"`
 	Binding      string            `json:"binding"`
+	Severity     string            `json:"severity"`
 	Mode         string            `json:"mode"`
 	Total        int               `json:"total"`
 	Compliant    int               `json:"compliant"`
@@ -437,9 +439,11 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if ignoreBindings && len(bindings) == 0 {
+	if ignoreBindings {
 		bindings = implicitBindingsForPolicies(policies)
 	}
+
+	severityByPolicy := policySeverityMap(policies)
 
 	var resources []map[string]interface{}
 	namespaceLabels := make(map[string]map[string]string)
@@ -502,7 +506,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		if bundleName == "pod-security-admission" {
 			psaLevelForEval = psaLevel
 		}
-		reports, nsReports, resReports, failures, err := evaluatePolicyReports(policies, bindings, resources, namespaceLabels, ignoreBindings, collectNamespace, collectResource, psaLevelForEval, progressEnabled)
+		reports, nsReports, resReports, failures, err := evaluatePolicyReports(policies, bindings, resources, namespaceLabels, severityByPolicy, ignoreBindings, collectNamespace, collectResource, psaLevelForEval, progressEnabled)
 		if err != nil {
 			return err
 		}
@@ -521,7 +525,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 				return err
 			}
 		} else {
-			if err := renderReport(reportMode, outputFormat, policyReports, resourceTotals, resourceDetails, writer, tableStyle, useColor); err != nil {
+			if err := renderReport(reportMode, outputFormat, policyReports, resourceTotals, resourceDetails, ignoreBindings, writer, tableStyle, useColor); err != nil {
 				return err
 			}
 		}
@@ -549,7 +553,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 				return err
 			}
 		} else {
-			if err := renderResourceReport(reportMode, outputFormat, resourceReport, writer, tableStyle, useColor); err != nil {
+			if err := renderResourceReport(reportMode, outputFormat, resourceReport, ignoreBindings, writer, tableStyle, useColor); err != nil {
 				return err
 			}
 		}
@@ -571,7 +575,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, ignoreBindings bool, collectNamespace bool, collectResource bool, psaLevel string, progressEnabled bool) ([]*bindingReport, []namespaceReport, []resourceReport, bool, error) {
+func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []map[string]interface{}, namespaceLabels map[string]map[string]string, severityByPolicy map[string]string, ignoreBindings bool, collectNamespace bool, collectResource bool, psaLevel string, progressEnabled bool) ([]*bindingReport, []namespaceReport, []resourceReport, bool, error) {
 	if len(bindings) == 0 {
 		logging.Debugf("No ValidatingAdmissionPolicyBindings available to evaluate")
 		return nil, nil, nil, false, nil
@@ -624,12 +628,16 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 			return nil, nil, nil, false, fmt.Errorf("binding %s references missing policy %s", binding.Name, binding.Spec.PolicyName)
 		}
 
-		bReport := &bindingReport{
-			Policy:  policy.Name,
-			Binding: binding.Name,
-			Mode:    bindingMode(binding),
+		severity := severityByPolicy[policy.Name]
+		if severity == "" {
+			severity = severityNotRated
 		}
-		reports = append(reports, bReport)
+		bReport := &bindingReport{
+			Policy:   policy.Name,
+			Binding:  binding.Name,
+			Severity: severity,
+			Mode:     bindingMode(binding),
+		}
 
 		logging.Debugf("Evaluating binding %s targeting policy %s", binding.Name, policy.Name)
 		matched := false
@@ -695,6 +703,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 							violations[i] = violationDetail{
 								Policy:   policy.Name,
 								Binding:  binding.Name,
+								Severity: severity,
 								Resource: resourceName,
 								Message:  violation.Message,
 								Path:     violation.Path,
@@ -737,7 +746,9 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 		mu.Unlock()
 		if !matchedNow {
 			logging.Debugf("  No resources matched binding %s", binding.Name)
+			continue
 		}
+		reports = append(reports, bReport)
 	}
 
 	var (
@@ -1051,26 +1062,9 @@ func bindingMode(binding *admissionregistrationv1.ValidatingAdmissionPolicyBindi
 	return strings.Join(actionsToStrings(actions), ",")
 }
 
-func violationSeverityColor(actions []string) (string, *color.Color) {
-	has := func(target string) bool {
-		for _, action := range actions {
-			if strings.EqualFold(action, target) {
-				return true
-			}
-		}
-		return false
-	}
-
-	switch {
-	case has("Deny"):
-		return "deny", color.New(color.FgHiRed, color.Bold)
-	case has("Audit"):
-		return "audit", color.New(color.FgHiBlue, color.Bold)
-	case has("Warn"):
-		return "warn", color.New(color.FgHiYellow, color.Bold)
-	default:
-		return "info", color.New(color.FgWhite)
-	}
+func violationSeverityLabel(severity string) (string, *color.Color) {
+	normalized := normalizeSeverity(severity)
+	return strings.ToUpper(normalized), severityColor(normalized)
 }
 
 func maxInt64(a, b int64) int64 {
@@ -1227,12 +1221,12 @@ func namespacesFromResources(resources []map[string]interface{}) []string {
 	return format.UniqueSortedStrings(namespaces)
 }
 
-func renderReport(reportMode, outputFormat string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail, w io.Writer, style table.Style, useColor bool) error {
+func renderReport(reportMode, outputFormat string, reports []*bindingReport, resourceTotals map[string]int, resourceDetails []resourceDetail, hideBindingInfo bool, w io.Writer, style table.Style, useColor bool) error {
 	switch outputFormat {
 	case "json":
 		return renderJSONReport(reportMode, reports, resourceTotals, resourceDetails, w)
 	case "table":
-		printSummaryTables(reports, w, style)
+		printSummaryTables(reports, hideBindingInfo, w, style)
 		printResourceTotals(resourceTotals, w, style)
 		if reportMode == "all" {
 			printViolationLogs(reports, w, useColor)
@@ -1244,11 +1238,12 @@ func renderReport(reportMode, outputFormat string, reports []*bindingReport, res
 }
 
 type policyJSONReport struct {
-	Report    string           `json:"report"`
-	Format    string           `json:"format"`
-	Data      []*bindingReport `json:"bindings"`
-	Totals    map[string]int   `json:"resourceTotals,omitempty"`
-	Resources []resourceDetail `json:"resources,omitempty"`
+	Report     string            `json:"report"`
+	Format     string            `json:"format"`
+	Data       []*bindingReport  `json:"bindings"`
+	Violations []violationDetail `json:"violations,omitempty"`
+	Totals     map[string]int    `json:"resourceTotals,omitempty"`
+	Resources  []resourceDetail  `json:"resources,omitempty"`
 }
 
 func buildPolicyJSONReport(reportMode string, reports []*bindingReport, resourceTotals map[string]int, details []resourceDetail) policyJSONReport {
@@ -1262,10 +1257,11 @@ func buildPolicyJSONReport(reportMode string, reports []*bindingReport, resource
 	}
 	for _, br := range reports {
 		copyReport := *br
-		if reportMode != "all" {
-			copyReport.Violations = nil
-		}
+		copyReport.Violations = nil
 		payload.Data = append(payload.Data, &copyReport)
+	}
+	if reportMode == "all" {
+		payload.Violations = flattenViolationsSortedBySeverity(reports)
 	}
 	return payload
 }
@@ -1297,6 +1293,10 @@ func buildNamespaceJSONReport(reportMode string, reports []namespaceReport, reso
 		copyRes := res
 		if reportMode != "all" {
 			copyRes.Violations = nil
+		} else if len(copyRes.Violations) > 0 {
+			sorted := append([]violationDetail(nil), copyRes.Violations...)
+			sortViolationsBySeverity(sorted)
+			copyRes.Violations = sorted
 		}
 		payload.Namespaces = append(payload.Namespaces, copyRes)
 	}
@@ -1324,7 +1324,7 @@ func renderNamespaceReport(reportMode, outputFormat string, reports []namespaceR
 	return nil
 }
 
-func renderResourceReport(reportMode, outputFormat string, reports []resourceReport, w io.Writer, style table.Style, useColor bool) error {
+func renderResourceReport(reportMode, outputFormat string, reports []resourceReport, ignoreBindings bool, w io.Writer, style table.Style, useColor bool) error {
 	switch outputFormat {
 	case "json":
 		payload := buildResourceJSONReport(reportMode, reports)
@@ -1334,7 +1334,7 @@ func renderResourceReport(reportMode, outputFormat string, reports []resourceRep
 		}
 		fmt.Fprintln(w, string(encoded))
 	case "table":
-		printResourceViolationTable(reportMode, reports, w, style, useColor)
+		printResourceViolationTable(reportMode, reports, ignoreBindings, w, style, useColor)
 	default:
 		return fmt.Errorf("unsupported format %s", outputFormat)
 	}
@@ -1356,20 +1356,32 @@ func buildResourceJSONReport(reportMode string, reports []resourceReport) resour
 		copyRes := res
 		if reportMode != "all" {
 			copyRes.Violations = nil
+		} else if len(copyRes.Violations) > 0 {
+			sorted := append([]violationDetail(nil), copyRes.Violations...)
+			sortViolationsBySeverity(sorted)
+			copyRes.Violations = sorted
 		}
 		payload.Resources = append(payload.Resources, copyRes)
 	}
 	return payload
 }
 
-func printResourceViolationTable(reportMode string, reports []resourceReport, w io.Writer, style table.Style, useColor bool) {
+func printResourceViolationTable(reportMode string, reports []resourceReport, ignoreBindings bool, w io.Writer, style table.Style, useColor bool) {
+	header := table.Row{"Resource", "Violations (Bindings)", "Violations", "Policies"}
+	if ignoreBindings {
+		header = table.Row{"Resource", "Violations", "Policies"}
+	}
 	if len(reports) == 0 {
 		t := table.NewWriter()
 		t.SetOutputMirror(w)
 		t.SetStyle(style)
-		t.AppendHeader(table.Row{"Resource", "Violations (Bindings)", "Violations", "Policies"})
+		t.AppendHeader(header)
 		t.AppendSeparator()
-		t.AppendRow(table.Row{"Totals", 0, 0, ""})
+		if ignoreBindings {
+			t.AppendRow(table.Row{"Totals", 0, ""})
+		} else {
+			t.AppendRow(table.Row{"Totals", 0, 0, ""})
+		}
 		fmt.Fprintln(w)
 		t.Render()
 		return
@@ -1377,7 +1389,7 @@ func printResourceViolationTable(reportMode string, reports []resourceReport, w 
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
-	t.AppendHeader(table.Row{"Resource", "Violations (Bindings)", "Violations", "Policies"})
+	t.AppendHeader(header)
 	totalViolations := 0
 	totalPolicyViolations := 0
 	currentKind := ""
@@ -1385,24 +1397,44 @@ func printResourceViolationTable(reportMode string, reports []resourceReport, w 
 		if report.Kind != "" && report.Kind != currentKind {
 			if currentKind != "" {
 				t.AppendSeparator()
-				t.AppendRow(table.Row{"", "", ""})
+				if ignoreBindings {
+					t.AppendRow(table.Row{"", "", ""})
+				} else {
+					t.AppendRow(table.Row{"", "", "", ""})
+				}
 			}
 			currentKind = report.Kind
-			t.AppendRow(table.Row{fmt.Sprintf("Kind: %s", report.Kind), "", "", ""})
+			if ignoreBindings {
+				t.AppendRow(table.Row{fmt.Sprintf("Kind: %s", report.Kind), "", ""})
+			} else {
+				t.AppendRow(table.Row{fmt.Sprintf("Kind: %s", report.Kind), "", "", ""})
+			}
 		}
 		uniquePolicies := uniqueViolationFields(report.Violations, func(v violationDetail) string { return v.Policy })
 		policyCount := len(uniquePolicies)
-		t.AppendRow(table.Row{
-			report.Resource,
-			report.TotalViolations,
-			policyCount,
-			strings.Join(uniquePolicies, "\n"),
-		})
+		if ignoreBindings {
+			t.AppendRow(table.Row{
+				report.Resource,
+				policyCount,
+				strings.Join(uniquePolicies, "\n"),
+			})
+		} else {
+			t.AppendRow(table.Row{
+				report.Resource,
+				report.TotalViolations,
+				policyCount,
+				strings.Join(uniquePolicies, "\n"),
+			})
+		}
 		totalViolations += report.TotalViolations
 		totalPolicyViolations += policyCount
 	}
 	t.AppendSeparator()
-	t.AppendRow(table.Row{"Totals", totalViolations, totalPolicyViolations, ""})
+	if ignoreBindings {
+		t.AppendRow(table.Row{"Totals", totalPolicyViolations, ""})
+	} else {
+		t.AppendRow(table.Row{"Totals", totalViolations, totalPolicyViolations, ""})
+	}
 	fmt.Fprintln(w)
 	t.Render()
 	if reportMode == "all" {
@@ -1441,27 +1473,16 @@ func printResourceViolationLogs(reports []resourceReport, w io.Writer, useColor 
 		} else {
 			fmt.Fprintf(w, "Resource: %s\n", res.Resource)
 		}
-		byPolicy := make(map[string][]violationDetail)
-		for _, violation := range res.Violations {
-			byPolicy[violation.Policy] = append(byPolicy[violation.Policy], violation)
-		}
-		policies := make([]string, 0, len(byPolicy))
-		for policy := range byPolicy {
-			policies = append(policies, policy)
-		}
-		sort.Strings(policies)
-		for _, policy := range policies {
-			violations := byPolicy[policy]
-			fmt.Fprintf(w, "Policy : %s\n", policy)
-			for _, violation := range violations {
-				severity, formatter := violationSeverityColor(violation.Actions)
-				if useColor {
-					formatter.Fprintf(w, "[%s] Binding %s\n", strings.ToUpper(severity), violation.Binding)
-				} else {
-					fmt.Fprintf(w, "[%s] Binding %s\n", strings.ToUpper(severity), violation.Binding)
-				}
-				fmt.Fprintf(w, "Message : %s\n", violation.Message)
+		sortedViolations := append([]violationDetail(nil), res.Violations...)
+		sortViolationsBySeverity(sortedViolations)
+		for _, violation := range sortedViolations {
+			label, formatter := violationSeverityLabel(violation.Severity)
+			if useColor {
+				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
+			} else {
+				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
 			}
+			fmt.Fprintf(w, "Message : %s\n", violation.Message)
 		}
 	}
 	if !found {
@@ -1507,12 +1528,14 @@ func printNamespaceViolationLogs(reports []namespaceReport, w io.Writer, useColo
 		}
 		found = true
 		fmt.Fprintf(w, "Namespace: %s\n", res.Namespace)
-		for _, violation := range res.Violations {
-			severity, formatter := violationSeverityColor(violation.Actions)
+		sortedViolations := append([]violationDetail(nil), res.Violations...)
+		sortViolationsBySeverity(sortedViolations)
+		for _, violation := range sortedViolations {
+			label, formatter := violationSeverityLabel(violation.Severity)
 			if useColor {
-				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
+				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
 			} else {
-				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
+				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
 			}
 			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
 			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
@@ -1523,7 +1546,7 @@ func printNamespaceViolationLogs(reports []namespaceReport, w io.Writer, useColo
 	}
 }
 
-func printSummaryTables(reports []*bindingReport, w io.Writer, style table.Style) {
+func printSummaryTables(reports []*bindingReport, hideBindingInfo bool, w io.Writer, style table.Style) {
 	if len(reports) == 0 {
 		fmt.Fprintln(w, "No policies evaluated.")
 		return
@@ -1534,16 +1557,28 @@ func printSummaryTables(reports []*bindingReport, w io.Writer, style table.Style
 	t.SetStyle(style)
 	t.Style().Title.Align = text.AlignLeft
 
-	t.AppendHeader(table.Row{"Policy", "Binding", "Mode", "Total", "Compliant", "NonCompliant"})
+	if hideBindingInfo {
+		t.AppendHeader(table.Row{"Policy", "Severity", "Total", "Compliant", "NonCompliant"})
+	} else {
+		t.AppendHeader(table.Row{"Policy", "Binding", "Severity", "Mode", "Total", "Compliant", "NonCompliant"})
+	}
 	var totalTotal, totalCompliant, totalNon int
 	for _, br := range reports {
-		t.AppendRow(table.Row{br.Policy, br.Binding, br.Mode, br.Total, br.Compliant, br.NonCompliant})
+		if hideBindingInfo {
+			t.AppendRow(table.Row{br.Policy, br.Severity, br.Total, br.Compliant, br.NonCompliant})
+		} else {
+			t.AppendRow(table.Row{br.Policy, br.Binding, br.Severity, br.Mode, br.Total, br.Compliant, br.NonCompliant})
+		}
 		totalTotal += br.Total
 		totalCompliant += br.Compliant
 		totalNon += br.NonCompliant
 	}
 	t.AppendSeparator()
-	t.AppendRow(table.Row{"Totals", "", "", totalTotal, totalCompliant, totalNon})
+	if hideBindingInfo {
+		t.AppendRow(table.Row{"Totals", "", totalTotal, totalCompliant, totalNon})
+	} else {
+		t.AppendRow(table.Row{"Totals", "", "", "", totalTotal, totalCompliant, totalNon})
+	}
 	t.SetTitle("Policy Compliance Overview")
 	fmt.Fprintln(w)
 	t.Render()
@@ -1611,23 +1646,47 @@ func collectResourceDetails(resources []map[string]interface{}) []resourceDetail
 
 func printViolationLogs(reports []*bindingReport, w io.Writer, useColor bool) {
 	fmt.Fprintln(w, "\nViolations")
-	found := false
-	for _, br := range reports {
-		for _, violation := range br.Violations {
-			found = true
-			severity, formatter := violationSeverityColor(violation.Actions)
-			if useColor {
-				formatter.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
-			} else {
-				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", strings.ToUpper(severity), violation.Policy, violation.Binding)
-			}
-			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
-			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
-		}
-	}
-	if !found {
+	violations := flattenViolationsSortedBySeverity(reports)
+	if len(violations) == 0 {
 		fmt.Fprintln(w, "No violations detected.")
+		return
 	}
+	for _, violation := range violations {
+		label, formatter := violationSeverityLabel(violation.Severity)
+		if useColor {
+			formatter.Fprintf(w, "[%s] Policy %s\n", label, violation.Policy)
+		} else {
+			fmt.Fprintf(w, "[%s] Policy %s\n", label, violation.Policy)
+		}
+		fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
+		fmt.Fprintf(w, "Message  : %s\n", violation.Message)
+	}
+}
+
+func flattenViolationsSortedBySeverity(reports []*bindingReport) []violationDetail {
+	var violations []violationDetail
+	for _, br := range reports {
+		violations = append(violations, br.Violations...)
+	}
+	sortViolationsBySeverity(violations)
+	return violations
+}
+
+func sortViolationsBySeverity(violations []violationDetail) {
+	sort.SliceStable(violations, func(i, j int) bool {
+		ri := severityRank(violations[i].Severity)
+		rj := severityRank(violations[j].Severity)
+		if ri != rj {
+			return ri < rj
+		}
+		if violations[i].Policy != violations[j].Policy {
+			return violations[i].Policy < violations[j].Policy
+		}
+		if violations[i].Resource != violations[j].Resource {
+			return violations[i].Resource < violations[j].Resource
+		}
+		return violations[i].Message < violations[j].Message
+	})
 }
 func collectFiles(dir string) ([]string, error) {
 	dirEntries, err := os.ReadDir(dir)
