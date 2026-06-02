@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -260,4 +261,228 @@ func TestLoadDir(t *testing.T) {
 
 func renamePolicy(yaml, newName string) string {
 	return string(bytes.Replace([]byte(yaml), []byte("name: test-policy"), []byte("name: "+newName), 1))
+}
+
+const policyWithAllAnnotationsYAML = `apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: annotated-policy
+  annotations:
+    security.kubeapt.io/displayName: Privileged Containers Not Allowed
+    security.kubeapt.io/description: Containers must not run with privileged=true.
+    security.kubeapt.io/category: Pod Security
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "true"
+`
+
+const policyWithKyvernoAnnotationsYAML = `apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kyverno-annotated-policy
+  annotations:
+    policies.kyverno.io/title: Block hostPath Volumes
+    policies.kyverno.io/description: hostPath volumes leak host filesystem state.
+    policies.kyverno.io/category: Pod Security
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "true"
+`
+
+const policyWithNoAnnotationsYAML = `apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: bare-policy
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "true"
+`
+
+func TestPolicyMetadata_KubeaptAnnotationsPreferred(t *testing.T) {
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyWithAllAnnotationsYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := bundle.Get("annotated-policy")
+	if got := p.Title(); got != "Privileged Containers Not Allowed" {
+		t.Errorf("Title() = %q, want kubeapt displayName", got)
+	}
+	if got := p.Description(); got != "Containers must not run with privileged=true." {
+		t.Errorf("Description() = %q, want kubeapt description", got)
+	}
+	if got := p.Category(); got != "Pod Security" {
+		t.Errorf("Category() = %q, want kubeapt category", got)
+	}
+}
+
+func TestPolicyMetadata_KyvernoFallback(t *testing.T) {
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyWithKyvernoAnnotationsYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := bundle.Get("kyverno-annotated-policy")
+	if got := p.Title(); got != "Block hostPath Volumes" {
+		t.Errorf("Title() = %q, want kyverno title fallback", got)
+	}
+	if got := p.Description(); got != "hostPath volumes leak host filesystem state." {
+		t.Errorf("Description() = %q, want kyverno description fallback", got)
+	}
+	if got := p.Category(); got != "Pod Security" {
+		t.Errorf("Category() = %q, want kyverno category fallback", got)
+	}
+}
+
+func TestPolicyMetadata_FallbacksWhenAbsent(t *testing.T) {
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyWithNoAnnotationsYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := bundle.Get("bare-policy")
+	if got := p.Title(); got != "bare-policy" {
+		t.Errorf("Title() = %q, want fallback to ID", got)
+	}
+	if got := p.Description(); got != "" {
+		t.Errorf("Description() = %q, want empty string when unset", got)
+	}
+	if got := p.Category(); got != "" {
+		t.Errorf("Category() = %q, want empty string when unset", got)
+	}
+}
+
+func TestBundleMetadata_FromBundleJSON(t *testing.T) {
+	fsys := fstest.MapFS{
+		"policies.yaml": {Data: []byte(policyHighSeverityYAML)},
+		"bundle.json": {Data: []byte(`{
+  "name": "pod-security-admission",
+  "description": "Pod Security Admission policies.",
+  "version": "v1.36.0"
+}`)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := bundle.Name(); got != "pod-security-admission" {
+		t.Errorf("Name() = %q", got)
+	}
+	if got := bundle.Description(); got != "Pod Security Admission policies." {
+		t.Errorf("Description() = %q", got)
+	}
+	if got := bundle.Version(); got != "v1.36.0" {
+		t.Errorf("Version() = %q", got)
+	}
+}
+
+func TestBundleMetadata_EmptyWhenBundleJSONAbsent(t *testing.T) {
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyHighSeverityYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := bundle.Name(); got != "" {
+		t.Errorf("Name() = %q, want empty without bundle.json", got)
+	}
+	if got := bundle.Description(); got != "" {
+		t.Errorf("Description() = %q, want empty without bundle.json", got)
+	}
+	if got := bundle.Version(); got != "" {
+		t.Errorf("Version() = %q, want empty without bundle.json", got)
+	}
+}
+
+func TestBundleMetadata_MalformedJSONIsError(t *testing.T) {
+	fsys := fstest.MapFS{
+		"policies.yaml": {Data: []byte(policyHighSeverityYAML)},
+		"bundle.json":   {Data: []byte(`{"name": "broken`)},
+	}
+	if _, err := policies.Load(fsys, "."); err == nil {
+		t.Fatal("Load on malformed bundle.json = nil, want error")
+	}
+}
+
+func TestBundleLabelsAndSources_Populated(t *testing.T) {
+	fsys := fstest.MapFS{
+		"policies.yaml": {Data: []byte(policyHighSeverityYAML)},
+		"bundle.json": {Data: []byte(`{
+  "name": "pod-security-admission",
+  "version": "v1.36.0",
+  "labels": {
+    "audit":   "pss.security.kolteq.com/audit",
+    "enforce": "pss.security.kolteq.com/enforce",
+    "warn":    "pss.security.kolteq.com/warn"
+  },
+  "sources": [
+    "https://github.com/kolteq/kubernetes-security-policies/releases/download/vap_pod-security-admission@v1.36.0/pod-security-admission.tar.gz"
+  ]
+}`)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	labels := bundle.Labels()
+	if labels["audit"] != "pss.security.kolteq.com/audit" || labels["enforce"] != "pss.security.kolteq.com/enforce" || labels["warn"] != "pss.security.kolteq.com/warn" {
+		t.Errorf("Labels() = %v, want audit/enforce/warn keys", labels)
+	}
+	sources := bundle.Sources()
+	if len(sources) != 1 || !strings.HasSuffix(sources[0], "pod-security-admission.tar.gz") {
+		t.Errorf("Sources() = %v, want one .tar.gz URL", sources)
+	}
+}
+
+func TestBundleLabelsAndSources_NilWhenAbsent(t *testing.T) {
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyHighSeverityYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := bundle.Labels(); got != nil {
+		t.Errorf("Labels() = %v, want nil without bundle.json", got)
+	}
+	if got := bundle.Sources(); got != nil {
+		t.Errorf("Sources() = %v, want nil without bundle.json", got)
+	}
+}
+
+func TestBundleLabelsAndSources_DefensiveCopy(t *testing.T) {
+	fsys := fstest.MapFS{
+		"policies.yaml": {Data: []byte(policyHighSeverityYAML)},
+		"bundle.json": {Data: []byte(`{
+  "name": "b",
+  "labels": {"audit": "k1"},
+  "sources": ["s1"]
+}`)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Mutate the returned copies; subsequent reads must reflect the original.
+	bundle.Labels()["audit"] = "tampered"
+	bundle.Sources()[0] = "tampered"
+	if got := bundle.Labels()["audit"]; got != "k1" {
+		t.Errorf("Labels() mutation leaked back: got %q, want k1", got)
+	}
+	if got := bundle.Sources()[0]; got != "s1" {
+		t.Errorf("Sources() mutation leaked back: got %q, want s1", got)
+	}
 }
