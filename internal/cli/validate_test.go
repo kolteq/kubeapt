@@ -1,11 +1,15 @@
 package cli
 
 import (
+    "bytes"
+    "encoding/json"
     "os"
     "path/filepath"
     "reflect"
+    "strings"
     "testing"
 
+    "github.com/jedib0t/go-pretty/v6/table"
     admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
 
@@ -112,5 +116,95 @@ func TestPSALabelHelpers(t *testing.T) {
     modes := map[string]string{"enforce": "baseline"}
     if got := formatPSAMode(modes, map[string]bool{"enforce": true}, "enforce", true); got != "baseline (KolTEQ)" {
         t.Fatalf("unexpected PSA mode format: %s", got)
+    }
+}
+
+func TestHighestResourceSeverity(t *testing.T) {
+    // A resource carrying multiple violations is bucketed under the most
+    // severe one, so per-namespace severity columns sum to NonCompliant.
+    got := highestResourceSeverity([]violationDetail{
+        {Severity: "low"},
+        {Severity: "Critical"},
+        {Severity: "moderate"},
+    })
+    if got != severityCritical {
+        t.Fatalf("expected %q, got %q", severityCritical, got)
+    }
+
+    // No violations at all → defaults to Not Rated so the bucket is never empty.
+    if got := highestResourceSeverity(nil); got != severityNotRated {
+        t.Fatalf("expected %q for empty input, got %q", severityNotRated, got)
+    }
+
+    // Unrecognized strings normalize to Not Rated rather than disappearing.
+    if got := highestResourceSeverity([]violationDetail{{Severity: "bogus"}}); got != severityNotRated {
+        t.Fatalf("expected %q for unknown severity, got %q", severityNotRated, got)
+    }
+}
+
+func TestVisibleSeverityColumnsHidesZeros(t *testing.T) {
+    reports := []namespaceReport{
+        {Namespace: "ns1", SeverityCounts: map[string]int{severityHigh: 2, severityLow: 1}},
+        {Namespace: "ns2", SeverityCounts: map[string]int{severityHigh: 3}},
+    }
+    visible, totals := visibleSeverityColumns(reports)
+    // Only High and Low should appear; Critical/Moderate/Info/Not Rated stay hidden.
+    want := []string{severityHigh, severityLow}
+    if !reflect.DeepEqual(visible, want) {
+        t.Fatalf("visible severities = %v, want %v", visible, want)
+    }
+    if totals[severityHigh] != 5 || totals[severityLow] != 1 {
+        t.Fatalf("totals = %v, want High=5 Low=1", totals)
+    }
+}
+
+func TestPrintNamespaceTableShowsSeverityColumns(t *testing.T) {
+    reports := []namespaceReport{
+        {Namespace: "prod-api", Total: 24, Compliant: 19, NonCompliant: 5,
+            SeverityCounts: map[string]int{severityCritical: 2, severityHigh: 3}},
+        {Namespace: "prod-web", Total: 18, Compliant: 18, NonCompliant: 0},
+    }
+    var buf bytes.Buffer
+    printNamespaceTable(reports, &buf, table.StyleDefault)
+    out := buf.String()
+    // go-pretty uppercases header text; row values keep their case.
+    upperOut := strings.ToUpper(out)
+    for _, want := range []string{severityCritical, severityHigh} {
+        if !strings.Contains(upperOut, strings.ToUpper(want)) {
+            t.Errorf("table missing header %q\noutput:\n%s", want, out)
+        }
+    }
+    for _, want := range []string{"prod-api", "Totals"} {
+        if !strings.Contains(out, want) {
+            t.Errorf("table missing %q\noutput:\n%s", want, out)
+        }
+    }
+    // Moderate/Low/Info/Not Rated have zero totals and must not appear as headers.
+    for _, hidden := range []string{severityModerate, severityLow, severityInfo, severityNotRated} {
+        if strings.Contains(upperOut, strings.ToUpper(hidden)) {
+            t.Errorf("table should hide zero-count column %q\noutput:\n%s", hidden, out)
+        }
+    }
+}
+
+func TestBuildNamespaceJSONReportMirrorsSeverity(t *testing.T) {
+    reports := []namespaceReport{
+        {Namespace: "ns1", Total: 5, Compliant: 3, NonCompliant: 2,
+            SeverityCounts: map[string]int{severityHigh: 1, severityLow: 1}},
+        {Namespace: "ns2", Total: 4, Compliant: 4},
+    }
+    payload := buildNamespaceJSONReport("summary", reports, nil)
+    if payload.SeverityTotals[severityHigh] != 1 || payload.SeverityTotals[severityLow] != 1 {
+        t.Errorf("SeverityTotals = %v, want High=1 Low=1", payload.SeverityTotals)
+    }
+    encoded, err := json.Marshal(payload)
+    if err != nil {
+        t.Fatalf("marshal: %v", err)
+    }
+    if !strings.Contains(string(encoded), `"severityCounts"`) {
+        t.Errorf("expected per-namespace severityCounts in JSON, got %s", encoded)
+    }
+    if !strings.Contains(string(encoded), `"severityTotals"`) {
+        t.Errorf("expected top-level severityTotals in JSON, got %s", encoded)
     }
 }

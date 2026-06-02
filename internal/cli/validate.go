@@ -60,11 +60,12 @@ type bindingReport struct {
 }
 
 type namespaceReport struct {
-	Namespace    string            `json:"namespace"`
-	Total        int               `json:"total"`
-	Compliant    int               `json:"compliant"`
-	NonCompliant int               `json:"nonCompliant"`
-	Violations   []violationDetail `json:"violations,omitempty"`
+	Namespace      string            `json:"namespace"`
+	Total          int               `json:"total"`
+	Compliant      int               `json:"compliant"`
+	NonCompliant   int               `json:"nonCompliant"`
+	SeverityCounts map[string]int    `json:"severityCounts,omitempty"`
+	Violations     []violationDetail `json:"violations,omitempty"`
 }
 
 type resourceReport struct {
@@ -751,9 +752,14 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 				report.Compliant++
 			} else {
 				report.NonCompliant++
-				if violations := resourceViolations[id]; len(violations) > 0 {
+				violations := resourceViolations[id]
+				if len(violations) > 0 {
 					report.Violations = append(report.Violations, violations...)
 				}
+				if report.SeverityCounts == nil {
+					report.SeverityCounts = make(map[string]int)
+				}
+				report.SeverityCounts[highestResourceSeverity(violations)]++
 			}
 		}
 		for _, resource := range resources {
@@ -843,6 +849,24 @@ func updateResourceStatus(status map[string]bool, namespaces map[string]string, 
 	if len(newViolations) > 0 {
 		violations[id] = append(violations[id], newViolations...)
 	}
+}
+
+// highestResourceSeverity returns the severity label of the most severe
+// violation observed on a single resource. Used to bucket each non-compliant
+// resource under exactly one severity, so per-namespace severity columns sum
+// to the namespace's NonCompliant count.
+func highestResourceSeverity(violations []violationDetail) string {
+	best := severityNotRated
+	bestRank := severityRank(best)
+	for _, v := range violations {
+		normalized := normalizeSeverity(v.Severity)
+		r := severityRank(normalized)
+		if r < bestRank {
+			best = normalized
+			bestRank = r
+		}
+	}
+	return best
 }
 
 func implicitBindingsForPolicies(policies []admissionregistrationv1.ValidatingAdmissionPolicy) []admissionregistrationv1.ValidatingAdmissionPolicyBinding {
@@ -1256,10 +1280,11 @@ func renderJSONReport(reportMode string, reports []*bindingReport, resourceTotal
 }
 
 type namespaceJSONReport struct {
-	Report     string            `json:"report"`
-	Format     string            `json:"format"`
-	Namespaces []namespaceReport `json:"namespaces"`
-	Totals     map[string]int    `json:"resourceTotals,omitempty"`
+	Report         string            `json:"report"`
+	Format         string            `json:"format"`
+	Namespaces     []namespaceReport `json:"namespaces"`
+	SeverityTotals map[string]int    `json:"severityTotals,omitempty"`
+	Totals         map[string]int    `json:"resourceTotals,omitempty"`
 }
 
 func buildNamespaceJSONReport(reportMode string, reports []namespaceReport, resourceTotals map[string]int) namespaceJSONReport {
@@ -1268,6 +1293,7 @@ func buildNamespaceJSONReport(reportMode string, reports []namespaceReport, reso
 		Format: "json",
 		Totals: resourceTotals,
 	}
+	severityTotals := make(map[string]int)
 	for _, res := range reports {
 		copyRes := res
 		if reportMode != "all" {
@@ -1277,7 +1303,13 @@ func buildNamespaceJSONReport(reportMode string, reports []namespaceReport, reso
 			sortViolationsBySeverity(sorted)
 			copyRes.Violations = sorted
 		}
+		for sev, count := range copyRes.SeverityCounts {
+			severityTotals[sev] += count
+		}
 		payload.Namespaces = append(payload.Namespaces, copyRes)
+	}
+	if len(severityTotals) > 0 {
+		payload.SeverityTotals = severityTotals
 	}
 	return payload
 }
@@ -1481,21 +1513,62 @@ func printNamespaceTable(reports []namespaceReport, w io.Writer, style table.Sty
 		t.Render()
 		return
 	}
+
+	visibleSeverities, severityTotals := visibleSeverityColumns(reports)
+
+	header := table.Row{"Namespace", "Total Evaluated", "Compliant"}
+	for _, sev := range visibleSeverities {
+		header = append(header, sev)
+	}
+	header = append(header, "NonCompliant")
+
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
-	t.AppendHeader(table.Row{"Namespace", "Total Evaluated", "Compliant", "NonCompliant"})
+	t.AppendHeader(header)
+
 	var total, compliant, non int
 	for _, res := range reports {
-		t.AppendRow(table.Row{res.Namespace, res.Total, res.Compliant, res.NonCompliant})
+		row := table.Row{res.Namespace, res.Total, res.Compliant}
+		for _, sev := range visibleSeverities {
+			row = append(row, res.SeverityCounts[sev])
+		}
+		row = append(row, res.NonCompliant)
+		t.AppendRow(row)
 		total += res.Total
 		compliant += res.Compliant
 		non += res.NonCompliant
 	}
 	t.AppendSeparator()
-	t.AppendRow(table.Row{"Totals", total, compliant, non})
+	totalsRow := table.Row{"Totals", total, compliant}
+	for _, sev := range visibleSeverities {
+		totalsRow = append(totalsRow, severityTotals[sev])
+	}
+	totalsRow = append(totalsRow, non)
+	t.AppendRow(totalsRow)
 	fmt.Fprintln(w)
 	t.Render()
+}
+
+// visibleSeverityColumns returns the ordered severity labels that have at
+// least one count across the supplied reports, plus the grand-total map used
+// for the table's Totals row. Severities with zero count are hidden so the
+// table stays narrow on terminals.
+func visibleSeverityColumns(reports []namespaceReport) ([]string, map[string]int) {
+	order := []string{severityCritical, severityHigh, severityModerate, severityLow, severityInfo, severityNotRated}
+	totals := make(map[string]int, len(order))
+	for _, res := range reports {
+		for sev, count := range res.SeverityCounts {
+			totals[sev] += count
+		}
+	}
+	visible := make([]string, 0, len(order))
+	for _, sev := range order {
+		if totals[sev] > 0 {
+			visible = append(visible, sev)
+		}
+	}
+	return visible, totals
 }
 
 func printNamespaceViolationLogs(reports []namespaceReport, w io.Writer, useColor bool) {
