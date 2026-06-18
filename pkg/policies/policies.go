@@ -113,6 +113,35 @@ func (p *Policy) lookupAnnotation(keys ...string) string {
 	return ""
 }
 
+// Resources returns the sorted, de-duplicated resource plurals that the
+// policy's matchConstraints target (for example ["deployments", "pods"]).
+//
+// Subresource entries are reduced to their base resource, so a rule targeting
+// "pods/status" contributes "pods"; a wildcard rule contributes "*". It returns
+// nil for a nil *Policy or one whose parsed VAP declares no match constraints.
+func (p *Policy) Resources() []string {
+	if p == nil || p.parsed == nil {
+		return nil
+	}
+	return PolicyResources(p.parsed.VAP)
+}
+
+// TargetsResources reports whether the policy's matchConstraints target any of
+// the supplied resource plurals — the plural names used in
+// spec.matchConstraints.resourceRules.resources (for example "pods" or
+// "deployments"), not the Kind.
+//
+// Matching is case-insensitive and compares on the base resource, so a policy
+// that targets "pods/status" matches TargetsResources("pods"). A rule using the
+// "*" (or "*/*") wildcard targets every resource. It returns false when no
+// resources are supplied or the policy has no parsed match constraints.
+func (p *Policy) TargetsResources(resources ...string) bool {
+	if p == nil || p.parsed == nil {
+		return false
+	}
+	return PolicyTargetsResources(p.parsed.VAP, resources)
+}
+
 // Bundle is an iterable collection of *Policy keyed by ID.
 //
 // Bundle-level metadata (Name, Description, Version, Labels, Sources) comes
@@ -186,6 +215,44 @@ func (b *Bundle) Sources() []string {
 		return nil
 	}
 	return append([]string(nil), b.sources...)
+}
+
+// FilterByResources returns a new Bundle containing only the policies whose
+// matchConstraints target one of the supplied resource plurals (for example
+// "pods" or "deployments"). Load order is preserved and every kept policy keeps
+// its bindings; bundle-level metadata (Name, Description, Version, Labels,
+// Sources) is carried over unchanged.
+//
+// Matching follows (*Policy).TargetsResources: case-insensitive, base-resource
+// aware ("pods/status" is kept by FilterByResources("pods")), and a policy with
+// a "*"/"*/*" wildcard rule is always kept.
+//
+// Calling FilterByResources with no resources returns a structural copy that
+// still contains every policy. The returned Bundle shares the underlying
+// *Policy values with the receiver; neither bundle mutates them.
+func (b *Bundle) FilterByResources(resources ...string) *Bundle {
+	out := &Bundle{
+		byID:        make(map[string]*Policy, len(b.items)),
+		name:        b.name,
+		description: b.description,
+		version:     b.version,
+	}
+	if len(b.labels) > 0 {
+		out.labels = make(map[string]string, len(b.labels))
+		for k, v := range b.labels {
+			out.labels[k] = v
+		}
+	}
+	if len(b.sources) > 0 {
+		out.sources = append([]string(nil), b.sources...)
+	}
+	for _, p := range b.items {
+		if len(resources) == 0 || p.TargetsResources(resources...) {
+			out.items = append(out.items, p)
+			out.byID[p.ID] = p
+		}
+	}
+	return out
 }
 
 // LoadDir is a convenience wrapper around Load that reads from the host
@@ -451,4 +518,85 @@ func severityFromAnnotations(annotations map[string]string) types.Severity {
 	default:
 		return types.SeverityNotRated
 	}
+}
+
+// PolicyTargetsResources reports whether vap's matchConstraints target any of
+// the supplied resource plurals. It is the package-level form of
+// (*Policy).TargetsResources, exposed for callers that hold a parsed
+// *admissionregistrationv1.ValidatingAdmissionPolicy directly.
+//
+// Matching is case-insensitive and compares on the base resource, so a rule
+// targeting "pods/status" matches the request "pods". A "*"/"*/*" rule matches
+// every request. It returns false when vap is nil, declares no match
+// constraints, or resources is empty.
+func PolicyTargetsResources(vap *admissionregistrationv1.ValidatingAdmissionPolicy, resources []string) bool {
+	if vap == nil || vap.Spec.MatchConstraints == nil || len(resources) == 0 {
+		return false
+	}
+	for _, rule := range vap.Spec.MatchConstraints.ResourceRules {
+		for _, ruleResource := range rule.Resources {
+			for _, want := range resources {
+				if resourceRuleSelects(ruleResource, want) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// PolicyResources returns the sorted, de-duplicated resource plurals that vap's
+// matchConstraints target. Subresource entries are reduced to their base
+// resource ("pods/status" -> "pods") and a wildcard rule contributes "*". It
+// returns nil when vap is nil or declares no match constraints.
+func PolicyResources(vap *admissionregistrationv1.ValidatingAdmissionPolicy) []string {
+	if vap == nil || vap.Spec.MatchConstraints == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, rule := range vap.Spec.MatchConstraints.ResourceRules {
+		for _, ruleResource := range rule.Resources {
+			base := baseResource(ruleResource)
+			if base == "" {
+				continue
+			}
+			if _, ok := seen[base]; ok {
+				continue
+			}
+			seen[base] = struct{}{}
+			out = append(out, base)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resourceRuleSelects reports whether a single matchConstraints resource entry
+// (ruleResource) covers the requested resource plural (want). Both values are
+// normalized to lowercase; ruleResource is compared on its base resource and
+// the "*"/"*/*" wildcards match any request.
+func resourceRuleSelects(ruleResource, want string) bool {
+	ruleResource = strings.ToLower(strings.TrimSpace(ruleResource))
+	want = strings.ToLower(strings.TrimSpace(want))
+	if ruleResource == "" || want == "" {
+		return false
+	}
+	if ruleResource == "*" || ruleResource == "*/*" {
+		return true
+	}
+	if ruleResource == want {
+		return true
+	}
+	return baseResource(ruleResource) == want
+}
+
+// baseResource normalizes a matchConstraints resource entry to its lowercase
+// base resource, dropping any "/subresource" suffix ("pods/status" -> "pods").
+func baseResource(resource string) string {
+	resource = strings.ToLower(strings.TrimSpace(resource))
+	if idx := strings.IndexByte(resource, '/'); idx != -1 {
+		return resource[:idx]
+	}
+	return resource
 }

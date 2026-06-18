@@ -11,6 +11,7 @@ import (
 
     "github.com/jedib0t/go-pretty/v6/table"
     admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestParseNamespaces(t *testing.T) {
@@ -206,5 +207,105 @@ func TestBuildNamespaceJSONReportMirrorsSeverity(t *testing.T) {
     }
     if !strings.Contains(string(encoded), `"severityTotals"`) {
         t.Errorf("expected top-level severityTotals in JSON, got %s", encoded)
+    }
+}
+
+func TestParseResourceFilter(t *testing.T) {
+    got := parseResourceFilter("Pods, deployments ,,pods, ")
+    want := []string{"pods", "deployments"}
+    if !reflect.DeepEqual(got, want) {
+        t.Fatalf("parseResourceFilter() = %v, want %v", got, want)
+    }
+    if got := parseResourceFilter("   "); got != nil {
+        t.Fatalf("expected nil for blank input, got %v", got)
+    }
+    if got := parseResourceFilter(""); got != nil {
+        t.Fatalf("expected nil for empty input, got %v", got)
+    }
+}
+
+func TestFilterPoliciesByResource(t *testing.T) {
+    policy := func(name, resource string) admissionregistrationv1.ValidatingAdmissionPolicy {
+        return admissionregistrationv1.ValidatingAdmissionPolicy{
+            ObjectMeta: metav1.ObjectMeta{Name: name},
+            Spec: admissionregistrationv1.ValidatingAdmissionPolicySpec{
+                MatchConstraints: &admissionregistrationv1.MatchResources{
+                    ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{
+                        {RuleWithOperations: admissionregistrationv1.RuleWithOperations{Rule: admissionregistrationv1.Rule{Resources: []string{resource}}}},
+                    },
+                },
+            },
+        }
+    }
+    binding := func(name, policyName string) admissionregistrationv1.ValidatingAdmissionPolicyBinding {
+        return admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+            ObjectMeta: metav1.ObjectMeta{Name: name},
+            Spec: admissionregistrationv1.ValidatingAdmissionPolicyBindingSpec{PolicyName: policyName},
+        }
+    }
+    policyNames := func(ps []admissionregistrationv1.ValidatingAdmissionPolicy) []string {
+        out := make([]string, len(ps))
+        for i, p := range ps {
+            out[i] = p.Name
+        }
+        return out
+    }
+    bindingNames := func(bs []admissionregistrationv1.ValidatingAdmissionPolicyBinding) []string {
+        out := make([]string, len(bs))
+        for i, b := range bs {
+            out[i] = b.Name
+        }
+        return out
+    }
+
+    policies := []admissionregistrationv1.ValidatingAdmissionPolicy{
+        policy("pods-policy", "pods"),
+        policy("deploy-policy", "deployments"),
+    }
+    bindings := []admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+        binding("b-pods", "pods-policy"),
+        binding("b-deploy", "deploy-policy"),
+        binding("b-pods-2", "pods-policy"),
+    }
+
+    gotPolicies, gotBindings := filterPoliciesByResource(policies, bindings, []string{"pods"})
+    if !reflect.DeepEqual(policyNames(gotPolicies), []string{"pods-policy"}) {
+        t.Fatalf("expected only pods-policy, got %v", policyNames(gotPolicies))
+    }
+    if !reflect.DeepEqual(bindingNames(gotBindings), []string{"b-pods", "b-pods-2"}) {
+        t.Fatalf("expected bindings targeting pods-policy only, got %v", bindingNames(gotBindings))
+    }
+
+    // Empty filter returns the inputs unchanged.
+    samePolicies, sameBindings := filterPoliciesByResource(policies, bindings, nil)
+    if len(samePolicies) != 2 || len(sameBindings) != 3 {
+        t.Fatalf("expected inputs unchanged for empty filter, got %d policies %d bindings", len(samePolicies), len(sameBindings))
+    }
+
+    // No matching policy yields empty results (the caller turns this into an error).
+    emptyPolicies, _ := filterPoliciesByResource(policies, bindings, []string{"services"})
+    if len(emptyPolicies) != 0 {
+        t.Fatalf("expected no policies for unmatched resource, got %v", policyNames(emptyPolicies))
+    }
+}
+
+func TestPolicyResourceFlagParsing(t *testing.T) {
+    cmd := ValidateCmd(func() string { return "info" })
+    if err := cmd.ParseFlags([]string{"--policyresource", "pods", "--all-namespaces"}); err != nil {
+        t.Fatalf("ParseFlags error: %v", err)
+    }
+    got, err := cmd.Flags().GetString("policyresource")
+    if err != nil {
+        t.Fatalf("GetString: %v", err)
+    }
+    if got != "pods" {
+        t.Fatalf("policyresource = %q, want pods", got)
+    }
+    all, err := cmd.Flags().GetBool("all-namespaces")
+    if err != nil {
+        t.Fatalf("GetBool all-namespaces: %v", err)
+    }
+    if !all {
+        t.Fatalf("expected --all-namespaces to parse alongside --policyresource")
     }
 }
