@@ -13,7 +13,7 @@ import (
 	"github.com/kolteq/kubeapt/internal/logging"
 )
 
-const appVersion = "1.2.0"
+const appVersion = "1.3.0"
 
 var (
 	rootCmd = &cobra.Command{
