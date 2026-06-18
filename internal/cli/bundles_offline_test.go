@@ -23,8 +23,7 @@ const (
 	fixtureBindingsYAML = "apiVersion: admissionregistration.k8s.io/v1\nkind: ValidatingAdmissionPolicyBinding\nmetadata:\n  name: b\nspec:\n  policyName: p\n"
 )
 
-// seedInstalledBundle writes a fake bundle into the kubeapt config dir rooted
-// at the t.Setenv("HOME", ...) value, then returns the on-disk version dir.
+// seedInstalledBundle writes a fixture bundle and returns its version dir.
 func seedInstalledBundle(t *testing.T) string {
 	t.Helper()
 	versionDir, err := config.BundleVersionDir(testBundleName, testBundleVersion)

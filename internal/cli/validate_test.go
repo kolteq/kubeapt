@@ -12,6 +12,8 @@ import (
     "github.com/jedib0t/go-pretty/v6/table"
     admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+    "github.com/kolteq/kubeapt/pkg/types"
 )
 
 func TestParseNamespaces(t *testing.T) {
@@ -307,5 +309,98 @@ func TestPolicyResourceFlagParsing(t *testing.T) {
     }
     if !all {
         t.Fatalf("expected --all-namespaces to parse alongside --policyresource")
+    }
+}
+
+func TestParseGVRFilter(t *testing.T) {
+    got := parseGVRFilter("networking.k8s.io/v1/networkpolicies, /v1/services , projectcalico.org/networkpolicies, pods,, networking.k8s.io/v1/networkpolicies")
+    want := []types.GVR{
+        {Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"},
+        {Group: "", Version: "v1", Resource: "services"},
+        {Group: "projectcalico.org", Version: "*", Resource: "networkpolicies"},
+        {Group: "*", Version: "*", Resource: "pods"},
+    }
+    if !reflect.DeepEqual(got, want) {
+        t.Fatalf("parseGVRFilter() = %#v, want %#v", got, want)
+    }
+    if got := parseGVRFilter("   "); got != nil {
+        t.Fatalf("expected nil for blank input, got %v", got)
+    }
+    if got := parseGVRFilter(""); got != nil {
+        t.Fatalf("expected nil for empty input, got %v", got)
+    }
+}
+
+func TestFilterPoliciesByGVR(t *testing.T) {
+    policy := func(name, group, resource string) admissionregistrationv1.ValidatingAdmissionPolicy {
+        return admissionregistrationv1.ValidatingAdmissionPolicy{
+            ObjectMeta: metav1.ObjectMeta{Name: name},
+            Spec: admissionregistrationv1.ValidatingAdmissionPolicySpec{
+                MatchConstraints: &admissionregistrationv1.MatchResources{
+                    ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{
+                        {RuleWithOperations: admissionregistrationv1.RuleWithOperations{Rule: admissionregistrationv1.Rule{
+                            APIGroups: []string{group},
+                            Resources: []string{resource},
+                        }}},
+                    },
+                },
+            },
+        }
+    }
+    binding := func(name, policyName string) admissionregistrationv1.ValidatingAdmissionPolicyBinding {
+        return admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+            ObjectMeta: metav1.ObjectMeta{Name: name},
+            Spec: admissionregistrationv1.ValidatingAdmissionPolicyBindingSpec{PolicyName: policyName},
+        }
+    }
+    names := func(ps []admissionregistrationv1.ValidatingAdmissionPolicy) []string {
+        out := make([]string, len(ps))
+        for i, p := range ps {
+            out[i] = p.Name
+        }
+        return out
+    }
+
+    policies := []admissionregistrationv1.ValidatingAdmissionPolicy{
+        policy("k8s-netpol", "networking.k8s.io", "networkpolicies"),
+        policy("calico-netpol", "projectcalico.org", "networkpolicies"),
+    }
+    bindings := []admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+        binding("b-k8s", "k8s-netpol"),
+        binding("b-calico", "calico-netpol"),
+    }
+
+    // Group discriminates: only the networking.k8s.io policy and its binding survive.
+    gotPolicies, gotBindings := filterPoliciesByGVR(policies, bindings, []types.GVR{
+        {Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"},
+    })
+    if !reflect.DeepEqual(names(gotPolicies), []string{"k8s-netpol"}) {
+        t.Fatalf("expected only k8s-netpol, got %v", names(gotPolicies))
+    }
+    if len(gotBindings) != 1 || gotBindings[0].Name != "b-k8s" {
+        t.Fatalf("expected only b-k8s binding, got %v", gotBindings)
+    }
+
+    // Empty filter returns inputs unchanged.
+    samePolicies, sameBindings := filterPoliciesByGVR(policies, bindings, nil)
+    if len(samePolicies) != 2 || len(sameBindings) != 2 {
+        t.Fatalf("expected inputs unchanged for empty filter, got %d policies %d bindings", len(samePolicies), len(sameBindings))
+    }
+
+    // No match yields empty results (the caller turns this into an error).
+    emptyPolicies, _ := filterPoliciesByGVR(policies, bindings, []types.GVR{{Group: "", Version: "v1", Resource: "services"}})
+    if len(emptyPolicies) != 0 {
+        t.Fatalf("expected no policies for unmatched GVR, got %v", names(emptyPolicies))
+    }
+}
+
+func TestPolicyResourcesFlagMutualExclusion(t *testing.T) {
+    cmd := ValidateCmd(func() string { return "info" })
+    if err := cmd.ParseFlags([]string{"--policyresource", "pods", "--policy-resources", "/v1/pods"}); err != nil {
+        t.Fatalf("ParseFlags error: %v", err)
+    }
+    err := runValidate(cmd, nil)
+    if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+        t.Fatalf("expected mutual-exclusion error, got %v", err)
     }
 }

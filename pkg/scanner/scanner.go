@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,36 +25,38 @@ import (
 )
 
 // Scanner evaluates a sealed policies.Bundle against caller-supplied manifests.
-//
-// A Scanner is safe for concurrent Scan calls: the bundle is read-only after
-// load, the per-call manifest slice is deep-copied before evaluation, and the
-// internal CEL environment is rebuilt per evaluation.
 type Scanner struct {
 	bundle          *policies.Bundle
 	respectBindings bool
+	policyResources []types.GVR
 }
 
-// Option configures a Scanner at construction time. It is reserved for future
-// construction-time knobs; today the only concrete option is WithRespectBindings.
+// Option configures a Scanner at construction time.
 type Option func(*Scanner)
 
-// WithRespectBindings configures the Scanner to evaluate each policy only
-// against resources matched by the policy's own ValidatingAdmissionPolicyBinding
-// documents loaded with the bundle. Policies that have no binding will not fire.
-//
-// Without this option (the default), the scanner synthesizes an implicit
-// "match every matching resource" binding for each policy, so policies fire
-// against every resource that satisfies their matchConstraints. This is the
-// right default when the bundle is used as a detection ruleset rather than
-// enforcement constraints.
+// GVR re-exports types.GVR for callers importing only the scanner.
+type GVR = types.GVR
+
+// WithRespectBindings evaluates policies only against their loaded bindings.
 func WithRespectBindings() Option {
 	return func(s *Scanner) {
 		s.respectBindings = true
 	}
 }
 
-// New constructs a Scanner for the given bundle. It returns an error if bundle
-// is nil.
+// WithPolicyResources limits the scan to policies targeting the given GVRs.
+func WithPolicyResources(resources []GVR) Option {
+	return func(s *Scanner) {
+		for _, gvr := range resources {
+			if strings.TrimSpace(gvr.Resource) == "" {
+				continue
+			}
+			s.policyResources = append(s.policyResources, gvr)
+		}
+	}
+}
+
+// New constructs a Scanner for the given bundle.
 func New(bundle *policies.Bundle, opts ...Option) (*Scanner, error) {
 	if bundle == nil {
 		return nil, errors.New("scanner: nil bundle")
@@ -65,15 +68,7 @@ func New(bundle *policies.Bundle, opts ...Option) (*Scanner, error) {
 	return s, nil
 }
 
-// Scan evaluates every policy in the bundle against every manifest in the
-// slice and returns the aggregated Findings and per-evaluation ScanErrors.
-//
-// The input manifests slice is deep-copied before any normalization, so the
-// caller's data is never mutated.
-//
-// The returned error is non-nil only on catastrophic failure (e.g., context
-// cancellation). Per-(policy, resource) evaluation failures land in
-// Result.ScanErrors and the scan continues.
+// Scan evaluates every policy against every manifest, returning aggregated results.
 func (s *Scanner) Scan(ctx context.Context, manifests []types.Manifest) (*types.Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -86,6 +81,9 @@ func (s *Scanner) Scan(ctx context.Context, manifests []types.Manifest) (*types.
 	for policy := range s.bundle.Iterate() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if len(s.policyResources) > 0 && !policy.TargetsGVR(s.policyResources...) {
+			continue
 		}
 		parsed := policy.Parsed(scanaccess.Token{})
 		if parsed == nil || parsed.VAP == nil {

@@ -28,16 +28,10 @@ import (
 	"github.com/kolteq/kubeapt/pkg/types"
 )
 
-// ErrDuplicatePolicy is returned (wrapped) by Load when two
-// ValidatingAdmissionPolicy documents in the bundle share a metadata.name.
+// ErrDuplicatePolicy reports two policies sharing a metadata.name.
 var ErrDuplicatePolicy = errors.New("policies: duplicate policy id")
 
-// Annotation keys read from a parsed ValidatingAdmissionPolicy's metadata.
-//
-// The kubeapt-namespaced keys are checked first; the Kyverno community keys
-// act as a fallback so bundles authored against either convention surface
-// useful metadata. Unknown or missing values cause Title to fall back to
-// the policy ID and Description/Category to return the empty string.
+// Annotation keys read from a parsed policy's metadata.
 const (
 	policyAnnotationSeverity    = "security.kubeapt.io/severity"
 	policyAnnotationDisplayName = "security.kubeapt.io/displayName"
@@ -50,12 +44,6 @@ const (
 )
 
 // Policy is a sealed handle to one ValidatingAdmissionPolicy in a Bundle.
-//
-// ID is metadata.name. RawYAML is the single-document YAML for the policy,
-// suitable for `kubectl apply -f`. BindingYAML carries the multi-document
-// YAML for every ValidatingAdmissionPolicyBinding that targets this policy,
-// concatenated with the standard "---" separator; it is empty when no binding
-// references the policy.
 type Policy struct {
 	ID          string
 	RawYAML     []byte
@@ -64,18 +52,12 @@ type Policy struct {
 	parsed *scanaccess.Parsed
 }
 
-// Parsed returns the sealed typed view. Calling it requires a scanaccess.Token,
-// which only callers that can import internal/scanaccess (i.e., kubeapt's own
-// pkg/scanner) are able to construct.
+// Parsed returns the sealed typed view, gated by a token.
 func (p *Policy) Parsed(_ scanaccess.Token) *scanaccess.Parsed {
 	return p.parsed
 }
 
-// Title returns a human-readable display name for the policy, looked up in
-// the parsed VAP's annotations. It prefers the kubeapt key
-// (security.kubeapt.io/displayName), falls back to the Kyverno community key
-// (policies.kyverno.io/title), and finally to ID so the caller always
-// receives a non-empty string.
+// Title returns the policy's display name, falling back to ID.
 func (p *Policy) Title() string {
 	if v := p.lookupAnnotation(policyAnnotationDisplayName, kyvernoAnnotationTitle); v != "" {
 		return v
@@ -83,23 +65,17 @@ func (p *Policy) Title() string {
 	return p.ID
 }
 
-// Description returns the policy's human-readable description, looked up
-// under security.kubeapt.io/description, then policies.kyverno.io/description.
-// Returns "" if neither annotation is set.
+// Description returns the policy's description, or "" if unset.
 func (p *Policy) Description() string {
 	return p.lookupAnnotation(policyAnnotationDescription, kyvernoAnnotationDescription)
 }
 
-// Category returns the policy's category, useful for grouping policies in
-// catalog views. Looked up under security.kubeapt.io/category, then
-// policies.kyverno.io/category. Returns "" if neither annotation is set.
+// Category returns the policy's category, or "" if unset.
 func (p *Policy) Category() string {
 	return p.lookupAnnotation(policyAnnotationCategory, kyvernoAnnotationCategory)
 }
 
-// lookupAnnotation returns the first non-empty annotation value in keys
-// order, or "" if none are set. Safe to call on a *Policy whose sealed
-// parsed handle is nil (returns "").
+// lookupAnnotation returns the first non-empty annotation value, or "".
 func (p *Policy) lookupAnnotation(keys ...string) string {
 	if p == nil || p.parsed == nil || p.parsed.VAP == nil {
 		return ""
@@ -113,12 +89,7 @@ func (p *Policy) lookupAnnotation(keys ...string) string {
 	return ""
 }
 
-// Resources returns the sorted, de-duplicated resource plurals that the
-// policy's matchConstraints target (for example ["deployments", "pods"]).
-//
-// Subresource entries are reduced to their base resource, so a rule targeting
-// "pods/status" contributes "pods"; a wildcard rule contributes "*". It returns
-// nil for a nil *Policy or one whose parsed VAP declares no match constraints.
+// Resources returns the sorted resource plurals the policy targets.
 func (p *Policy) Resources() []string {
 	if p == nil || p.parsed == nil {
 		return nil
@@ -126,15 +97,7 @@ func (p *Policy) Resources() []string {
 	return PolicyResources(p.parsed.VAP)
 }
 
-// TargetsResources reports whether the policy's matchConstraints target any of
-// the supplied resource plurals — the plural names used in
-// spec.matchConstraints.resourceRules.resources (for example "pods" or
-// "deployments"), not the Kind.
-//
-// Matching is case-insensitive and compares on the base resource, so a policy
-// that targets "pods/status" matches TargetsResources("pods"). A rule using the
-// "*" (or "*/*") wildcard targets every resource. It returns false when no
-// resources are supplied or the policy has no parsed match constraints.
+// TargetsResources reports whether the policy targets any given resource plural.
 func (p *Policy) TargetsResources(resources ...string) bool {
 	if p == nil || p.parsed == nil {
 		return false
@@ -142,11 +105,15 @@ func (p *Policy) TargetsResources(resources ...string) bool {
 	return PolicyTargetsResources(p.parsed.VAP, resources)
 }
 
+// TargetsGVR reports whether the policy's matchConstraints select any GVR.
+func (p *Policy) TargetsGVR(gvrs ...types.GVR) bool {
+	if p == nil || p.parsed == nil {
+		return false
+	}
+	return PolicyTargetsGVRs(p.parsed.VAP, gvrs)
+}
+
 // Bundle is an iterable collection of *Policy keyed by ID.
-//
-// Bundle-level metadata (Name, Description, Version, Labels, Sources) comes
-// from an optional bundle.json at the loaded root; if no bundle.json is
-// present, the string getters return "" and Labels/Sources return nil.
 type Bundle struct {
 	items []*Policy
 	byID  map[string]*Policy
@@ -180,22 +147,16 @@ func (b *Bundle) Len() int {
 	return len(b.items)
 }
 
-// Name returns the bundle's declared name from bundle.json, or "" if no
-// bundle.json was found at the bundle root.
+// Name returns the bundle's declared name, or "".
 func (b *Bundle) Name() string { return b.name }
 
-// Description returns the bundle's declared description from bundle.json,
-// or "" if no bundle.json was found at the bundle root.
+// Description returns the bundle's declared description, or "".
 func (b *Bundle) Description() string { return b.description }
 
-// Version returns the bundle's declared version from bundle.json, or "" if
-// no bundle.json was found at the bundle root.
+// Version returns the bundle's declared version, or "".
 func (b *Bundle) Version() string { return b.version }
 
-// Labels returns the bundle's declared labels from bundle.json, or nil if
-// no bundle.json was found at the bundle root or the labels field was empty.
-// The returned map is a defensive copy; mutating it does not affect the
-// Bundle's internal state.
+// Labels returns a defensive copy of the bundle's labels, or nil.
 func (b *Bundle) Labels() map[string]string {
 	if len(b.labels) == 0 {
 		return nil
@@ -207,9 +168,7 @@ func (b *Bundle) Labels() map[string]string {
 	return out
 }
 
-// Sources returns the bundle's declared source URLs from bundle.json, or
-// nil if no bundle.json was found at the bundle root or the sources field
-// was empty. The returned slice is a defensive copy.
+// Sources returns a defensive copy of the bundle's source URLs, or nil.
 func (b *Bundle) Sources() []string {
 	if len(b.sources) == 0 {
 		return nil
@@ -217,19 +176,7 @@ func (b *Bundle) Sources() []string {
 	return append([]string(nil), b.sources...)
 }
 
-// FilterByResources returns a new Bundle containing only the policies whose
-// matchConstraints target one of the supplied resource plurals (for example
-// "pods" or "deployments"). Load order is preserved and every kept policy keeps
-// its bindings; bundle-level metadata (Name, Description, Version, Labels,
-// Sources) is carried over unchanged.
-//
-// Matching follows (*Policy).TargetsResources: case-insensitive, base-resource
-// aware ("pods/status" is kept by FilterByResources("pods")), and a policy with
-// a "*"/"*/*" wildcard rule is always kept.
-//
-// Calling FilterByResources with no resources returns a structural copy that
-// still contains every policy. The returned Bundle shares the underlying
-// *Policy values with the receiver; neither bundle mutates them.
+// FilterByResources returns a new Bundle keeping only policies targeting the resources.
 func (b *Bundle) FilterByResources(resources ...string) *Bundle {
 	out := &Bundle{
 		byID:        make(map[string]*Policy, len(b.items)),
@@ -255,8 +202,7 @@ func (b *Bundle) FilterByResources(resources ...string) *Bundle {
 	return out
 }
 
-// LoadDir is a convenience wrapper around Load that reads from the host
-// filesystem rooted at path.
+// LoadDir loads a bundle from a host filesystem path.
 func LoadDir(p string) (*Bundle, error) {
 	if p == "" {
 		return nil, errors.New("policies: empty path")
@@ -264,15 +210,7 @@ func LoadDir(p string) (*Bundle, error) {
 	return Load(os.DirFS(p), ".")
 }
 
-// Load walks fsys starting at root, decoding every .yaml/.yml/.json file as
-// a multi-document Kubernetes manifest stream. ValidatingAdmissionPolicy
-// documents become Policy entries; ValidatingAdmissionPolicyBinding documents
-// are attached to the policy they reference via spec.policyName.
-//
-// Documents of any other Kind are ignored.
-//
-// Load returns an error wrapping ErrDuplicatePolicy if two policies share a
-// metadata.name; check with errors.Is.
+// Load walks fsys from root, building a Bundle from policy documents.
 func Load(fsys fs.FS, root string) (*Bundle, error) {
 	if fsys == nil {
 		return nil, errors.New("policies: nil fs.FS")
@@ -383,9 +321,7 @@ func Load(fsys fs.FS, root string) (*Bundle, error) {
 	return bundle, nil
 }
 
-// loadBundleMetadata populates Bundle.name/description/version from a
-// bundle.json sitting at the bundle root. Missing file is not an error;
-// malformed JSON is.
+// loadBundleMetadata populates bundle fields from an optional bundle.json.
 func loadBundleMetadata(fsys fs.FS, root string, bundle *Bundle) error {
 	manifestPath := path.Join(root, "bundle.json")
 	data, err := fs.ReadFile(fsys, manifestPath)
@@ -478,8 +414,7 @@ func documentKind(doc []byte) (string, error) {
 	return meta.Kind, nil
 }
 
-// joinYAMLDocuments concatenates multiple single-document YAML blobs into one
-// multi-document stream, separated by the standard "---\n" marker.
+// joinYAMLDocuments concatenates YAML blobs into one multi-document stream.
 func joinYAMLDocuments(docs [][]byte) []byte {
 	if len(docs) == 0 {
 		return nil
@@ -500,8 +435,7 @@ func joinYAMLDocuments(docs [][]byte) []byte {
 	return buf.Bytes()
 }
 
-// severityFromAnnotations mirrors the normalization done in internal/cli/severity.go,
-// reproduced here so pkg/policies has no dependency on the CLI package.
+// severityFromAnnotations normalizes the severity annotation to a Severity.
 func severityFromAnnotations(annotations map[string]string) types.Severity {
 	raw := strings.ToLower(strings.TrimSpace(annotations[policyAnnotationSeverity]))
 	switch raw {
@@ -520,15 +454,7 @@ func severityFromAnnotations(annotations map[string]string) types.Severity {
 	}
 }
 
-// PolicyTargetsResources reports whether vap's matchConstraints target any of
-// the supplied resource plurals. It is the package-level form of
-// (*Policy).TargetsResources, exposed for callers that hold a parsed
-// *admissionregistrationv1.ValidatingAdmissionPolicy directly.
-//
-// Matching is case-insensitive and compares on the base resource, so a rule
-// targeting "pods/status" matches the request "pods". A "*"/"*/*" rule matches
-// every request. It returns false when vap is nil, declares no match
-// constraints, or resources is empty.
+// PolicyTargetsResources reports whether vap targets any given resource plural.
 func PolicyTargetsResources(vap *admissionregistrationv1.ValidatingAdmissionPolicy, resources []string) bool {
 	if vap == nil || vap.Spec.MatchConstraints == nil || len(resources) == 0 {
 		return false
@@ -545,10 +471,7 @@ func PolicyTargetsResources(vap *admissionregistrationv1.ValidatingAdmissionPoli
 	return false
 }
 
-// PolicyResources returns the sorted, de-duplicated resource plurals that vap's
-// matchConstraints target. Subresource entries are reduced to their base
-// resource ("pods/status" -> "pods") and a wildcard rule contributes "*". It
-// returns nil when vap is nil or declares no match constraints.
+// PolicyResources returns the sorted resource plurals vap targets.
 func PolicyResources(vap *admissionregistrationv1.ValidatingAdmissionPolicy) []string {
 	if vap == nil || vap.Spec.MatchConstraints == nil {
 		return nil
@@ -572,10 +495,66 @@ func PolicyResources(vap *admissionregistrationv1.ValidatingAdmissionPolicy) []s
 	return out
 }
 
-// resourceRuleSelects reports whether a single matchConstraints resource entry
-// (ruleResource) covers the requested resource plural (want). Both values are
-// normalized to lowercase; ruleResource is compared on its base resource and
-// the "*"/"*/*" wildcards match any request.
+// PolicyTargetsGVRs reports whether the policy's matchConstraints select any GVR.
+func PolicyTargetsGVRs(vap *admissionregistrationv1.ValidatingAdmissionPolicy, gvrs []types.GVR) bool {
+	if vap == nil || vap.Spec.MatchConstraints == nil || len(gvrs) == 0 {
+		return false
+	}
+	for _, rule := range vap.Spec.MatchConstraints.ResourceRules {
+		for _, gvr := range gvrs {
+			if ruleSelectsGVR(rule, gvr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ruleSelectsGVR reports whether one rule selects the requested GVR.
+func ruleSelectsGVR(rule admissionregistrationv1.NamedRuleWithOperations, gvr types.GVR) bool {
+	resource := strings.ToLower(strings.TrimSpace(gvr.Resource))
+	if resource == "" {
+		return false
+	}
+	if !apiGroupRequestMatches(gvr.Group, rule.APIGroups) {
+		return false
+	}
+	// Version is ignored for selection: group+resource only.
+	if len(rule.Resources) > 0 && !resourceRulesSelect(rule.Resources, resource) {
+		return false
+	}
+	return true
+}
+
+// apiGroupRequestMatches reports whether the group satisfies the rule's apiGroups.
+func apiGroupRequestMatches(reqGroup string, ruleGroups []string) bool {
+	reqGroup = strings.TrimSpace(reqGroup)
+	if reqGroup == "*" {
+		return true
+	}
+	if len(ruleGroups) == 0 {
+		return true
+	}
+	for _, g := range ruleGroups {
+		g = strings.TrimSpace(g)
+		if g == "*" || g == reqGroup {
+			return true
+		}
+	}
+	return false
+}
+
+// resourceRulesSelect reports whether any rule resource covers the request.
+func resourceRulesSelect(ruleResources []string, want string) bool {
+	for _, r := range ruleResources {
+		if resourceRuleSelects(r, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// resourceRuleSelects reports whether a rule resource entry covers want.
 func resourceRuleSelects(ruleResource, want string) bool {
 	ruleResource = strings.ToLower(strings.TrimSpace(ruleResource))
 	want = strings.ToLower(strings.TrimSpace(want))
@@ -591,8 +570,7 @@ func resourceRuleSelects(ruleResource, want string) bool {
 	return baseResource(ruleResource) == want
 }
 
-// baseResource normalizes a matchConstraints resource entry to its lowercase
-// base resource, dropping any "/subresource" suffix ("pods/status" -> "pods").
+// baseResource normalizes a resource entry, dropping any subresource suffix.
 func baseResource(resource string) string {
 	resource = strings.ToLower(strings.TrimSpace(resource))
 	if idx := strings.IndexByte(resource, '/'); idx != -1 {

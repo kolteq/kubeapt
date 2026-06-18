@@ -9,14 +9,7 @@ import (
 	"github.com/kolteq/kubeapt/pkg/types"
 )
 
-// TestManifestIsAlias asserts that types.Manifest is a Go type alias
-// (declared with `=`) rather than a defined type. If a future edit silently
-// converts the declaration to `type Manifest map[string]any`, these
-// assignments will stop compiling and the test will fail to build.
-//
-// Callers rely on this so that an existing []map[string]any (e.g.,
-// fsdump.Resource.Manifest on the consumer side) can be passed directly
-// to Scanner.Scan with no conversion loop.
+// TestManifestIsAlias asserts Manifest is a type alias for map.
 func TestManifestIsAlias(t *testing.T) {
 	// Single-value interchange in both directions.
 	var asAlias types.Manifest = map[string]any{"kind": "Pod"}
@@ -38,10 +31,7 @@ func TestManifestIsAlias(t *testing.T) {
 	takesManifest(map[string]any{})
 }
 
-// TestSeverityConstantValues pins the wire values of the Severity constants.
-// External consumers may switch on these strings, so accidentally changing
-// "Not Rated" to "NotRated" or "Critical" to "critical" would be a breaking
-// change that this test catches at the unit-test layer.
+// TestSeverityConstantValues pins the wire values of Severity constants.
 func TestSeverityConstantValues(t *testing.T) {
 	cases := map[types.Severity]string{
 		types.SeverityCritical: "Critical",

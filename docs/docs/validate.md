@@ -45,6 +45,27 @@ This works with any policy source (`--bundle`, `--policies`, `--policy-name`, or
 
 > `-pr` (a single dash) is not a valid shorthand — flag shorthands are a single character, so `-pr` would be read as `-p r`. Use `-R`, or the `--pr` long alias.
 
+### Group-aware filtering with `--policy-resources`
+
+`--policyresource` matches on the resource plural alone, so it cannot tell apart resources that share a plural across API groups — for example `networkpolicies` in `networking.k8s.io` versus `projectcalico.org`. When the group matters, use `--policy-resources`, which takes `group/version/resource` selectors:
+
+```bash
+# Only the built-in NetworkPolicy and core Service policies — not Calico's
+kubeapt validate --bundle my-bundle \
+  --policy-resources networking.k8s.io/v1/networkpolicies,/v1/services
+```
+
+Selector forms (comma-separated):
+
+- `group/version/resource` — e.g. `networking.k8s.io/v1/networkpolicies`.
+- `group/resource` — version defaults to any, e.g. `projectcalico.org/networkpolicies`.
+- `/version/resource` or `/resource` — a leading empty group selects the **core** group, e.g. `/v1/services`.
+- `resource` — a bare resource matches that resource in **any** group.
+
+Matching is an exact comparison against the policy's `matchConstraints` (group + plural resource), with no Kind→resource conversion, so it needs no cluster. The group is matched literally (the empty string is the core group); the version is **not used for selection** (matching is on group + resource only, so any version you write is accepted but ignored); and a policy rule using an `apiGroups`/`resources` wildcard (`*`) is always kept. `--policy-resources` and `--policyresource` cannot be combined.
+
+The same selection is available to Go callers as the `scanner.WithPolicyResources([]scanner.GVR{…})` option, so embedders get group-aware policy selection without going through the CLI.
+
 ## Views
 
 `--view` controls how results are grouped:
