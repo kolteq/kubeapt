@@ -35,6 +35,7 @@ import (
 	"github.com/kolteq/kubeapt/internal/logging"
 	"github.com/kolteq/kubeapt/internal/worker"
 	policypkg "github.com/kolteq/kubeapt/pkg/policies"
+	"github.com/kolteq/kubeapt/pkg/types"
 )
 
 var logLevelProvider func() string
@@ -95,6 +96,7 @@ func ValidateCmd(getLogLevel func() string) *cobra.Command {
 	cmd.Flags().StringP("policies", "p", "", "Specify the file or folder to the ValidatingAdmissionPolicy YAML file")
 	cmd.Flags().StringP("policy-name", "P", "", "Policy name to use from downloaded policies")
 	cmd.Flags().String("policyresource", "", "Comma separated resource plurals (e.g. pods,deployments) to only evaluate policies whose matchConstraints target them")
+	cmd.Flags().String("policy-resources", "", "Comma separated group/version/resource selectors (e.g. networking.k8s.io/v1/networkpolicies,/v1/services) to only evaluate policies whose matchConstraints target them; group-aware, unlike --policyresource")
 	cmd.Flags().StringP("bindings", "b", "", "Specify the file or folder to the ValidatingAdmissionPolicyBinding YAML file")
 	cmd.Flags().StringP("resource", "r", "", "Specify the file or folder to the resource YAML file to validate")
 	cmd.Flags().String("psa-level", "", "PSA level to evaluate when using the pod-security-admission bundle: baseline or restricted")
@@ -123,6 +125,10 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	policyResourceInput, err := flags.GetString("policyresource")
+	if err != nil {
+		return err
+	}
+	policyGVRInput, err := flags.GetString("policy-resources")
 	if err != nil {
 		return err
 	}
@@ -192,6 +198,9 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 	}
 	if policyName != "" && bindingFile != "" {
 		return fmt.Errorf("--policy-name cannot be combined with --bindings")
+	}
+	if strings.TrimSpace(policyResourceInput) != "" && strings.TrimSpace(policyGVRInput) != "" {
+		return fmt.Errorf("--policyresource and --policy-resources cannot be combined; use one")
 	}
 
 	if !ignoreBindings && bindingFile == "" && (policyFile != "" || policyName != "") {
@@ -426,6 +435,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 	}
 
 	resourceFilter := parseResourceFilter(policyResourceInput)
+	gvrFilter := parseGVRFilter(policyGVRInput)
 	if len(resourceFilter) > 0 {
 		originalCount := len(policies)
 		policies, bindings = filterPoliciesByResource(policies, bindings, resourceFilter)
@@ -433,6 +443,14 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("no policies target resource %s", strings.Join(resourceFilter, ", "))
 		}
 		logging.Debugf("Filtered policies by resource %s: %d of %d retained", strings.Join(resourceFilter, ", "), len(policies), originalCount)
+	}
+	if len(gvrFilter) > 0 {
+		originalCount := len(policies)
+		policies, bindings = filterPoliciesByGVR(policies, bindings, gvrFilter)
+		if len(policies) == 0 {
+			return fmt.Errorf("no policies target resource %s", policyGVRInput)
+		}
+		logging.Debugf("Filtered policies by GVR %s: %d of %d retained", policyGVRInput, len(policies), originalCount)
 	}
 
 	if ignoreBindings {
@@ -867,10 +885,7 @@ func updateResourceStatus(status map[string]bool, namespaces map[string]string, 
 	}
 }
 
-// highestResourceSeverity returns the severity label of the most severe
-// violation observed on a single resource. Used to bucket each non-compliant
-// resource under exactly one severity, so per-namespace severity columns sum
-// to the namespace's NonCompliant count.
+// highestResourceSeverity returns the most severe violation severity for a resource.
 func highestResourceSeverity(violations []violationDetail) string {
 	best := severityNotRated
 	bestRank := severityRank(best)
@@ -1161,9 +1176,7 @@ func parseNamespaces(arg string) []string {
 	return result
 }
 
-// parseResourceFilter splits a comma-separated --policyresource value into a
-// normalized, de-duplicated list of lowercase resource plurals. Empty entries
-// are dropped and an empty/whitespace argument yields nil.
+// parseResourceFilter parses --policyresource into deduplicated lowercase resource plurals.
 func parseResourceFilter(arg string) []string {
 	if strings.TrimSpace(arg) == "" {
 		return nil
@@ -1184,11 +1197,76 @@ func parseResourceFilter(arg string) []string {
 	return result
 }
 
-// filterPoliciesByResource narrows policies to those whose matchConstraints
-// target one of the requested resource plurals, and drops any binding that
-// references a policy that was filtered out (so binding evaluation never
-// references a missing policy). When resources is empty the inputs are
-// returned unchanged.
+// parseGVRFilter parses a comma-separated --policy-resources value into GVRs.
+func parseGVRFilter(arg string) []types.GVR {
+	if strings.TrimSpace(arg) == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var result []types.GVR
+	for _, part := range strings.Split(arg, ",") {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		gvr := parseGVRToken(part)
+		if gvr.Resource == "" {
+			continue
+		}
+		key := gvr.Group + "/" + gvr.Version + "/" + gvr.Resource
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, gvr)
+	}
+	return result
+}
+
+// parseGVRToken parses one "group/version/resource" selector into a GVR.
+func parseGVRToken(token string) types.GVR {
+	segments := strings.Split(token, "/")
+	for i := range segments {
+		segments[i] = strings.TrimSpace(segments[i])
+	}
+	switch len(segments) {
+	case 1:
+		return types.GVR{Group: "*", Version: "*", Resource: segments[0]}
+	case 2:
+		return types.GVR{Group: segments[0], Version: "*", Resource: segments[1]}
+	default:
+		return types.GVR{Group: segments[0], Version: segments[1], Resource: segments[len(segments)-1]}
+	}
+}
+
+// filterPoliciesByGVR keeps policies targeting the GVRs and their bindings.
+func filterPoliciesByGVR(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, gvrs []types.GVR) ([]admissionregistrationv1.ValidatingAdmissionPolicy, []admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+	if len(gvrs) == 0 {
+		return policies, bindings
+	}
+
+	keptPolicies := make([]admissionregistrationv1.ValidatingAdmissionPolicy, 0, len(policies))
+	keptNames := make(map[string]struct{}, len(policies))
+	for i := range policies {
+		if policypkg.PolicyTargetsGVRs(&policies[i], gvrs) {
+			keptPolicies = append(keptPolicies, policies[i])
+			keptNames[policies[i].Name] = struct{}{}
+		}
+	}
+
+	if len(bindings) == 0 {
+		return keptPolicies, bindings
+	}
+
+	keptBindings := make([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, 0, len(bindings))
+	for i := range bindings {
+		if _, ok := keptNames[bindings[i].Spec.PolicyName]; ok {
+			keptBindings = append(keptBindings, bindings[i])
+		}
+	}
+	return keptPolicies, keptBindings
+}
+
+// filterPoliciesByResource keeps policies targeting the resource plurals and their bindings.
 func filterPoliciesByResource(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, []admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
 	if len(resources) == 0 {
 		return policies, bindings
@@ -1621,10 +1699,7 @@ func printNamespaceTable(reports []namespaceReport, w io.Writer, style table.Sty
 	t.Render()
 }
 
-// visibleSeverityColumns returns the ordered severity labels that have at
-// least one count across the supplied reports, plus the grand-total map used
-// for the table's Totals row. Severities with zero count are hidden so the
-// table stays narrow on terminals.
+// visibleSeverityColumns returns nonzero severity columns and their totals.
 func visibleSeverityColumns(reports []namespaceReport) ([]string, map[string]int) {
 	order := []string{severityCritical, severityHigh, severityModerate, severityLow, severityInfo, severityNotRated}
 	totals := make(map[string]int, len(order))

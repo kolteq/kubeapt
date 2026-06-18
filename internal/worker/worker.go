@@ -5,7 +5,7 @@ package worker
 
 import "runtime"
 
-// WorkerLimit caps concurrency to the scheduler limit and available work.
+// WorkerLimit caps concurrency to CPU count and work.
 func WorkerLimit(total int) int {
 	if total <= 0 {
 		return 1

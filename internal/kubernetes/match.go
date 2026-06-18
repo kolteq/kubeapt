@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// MatchesPolicy evaluates whether the supplied object satisfies the policy's match constraints.
+// MatchesPolicy reports whether the object satisfies the policy.
 func MatchesPolicy(vap *admissionregistrationv1.ValidatingAdmissionPolicy, obj map[string]interface{}, namespaceLabels map[string]string, namespaceKnown bool, ignoreNamespaceSelectors bool) bool {
 	if vap == nil || vap.Spec.MatchConstraints == nil || obj == nil {
 		return false
@@ -23,7 +23,7 @@ func MatchesPolicy(vap *admissionregistrationv1.ValidatingAdmissionPolicy, obj m
 	return matchesResources(obj, namespaceLabels, namespaceKnown, vap.Spec.MatchConstraints, true, ignoreNamespaceSelectors, false)
 }
 
-// MatchesBinding evaluates whether a resource satisfies the optional selectors declared on a binding.
+// MatchesBinding reports whether the resource satisfies the binding selectors.
 func MatchesBinding(binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding, obj map[string]interface{}, namespaceLabels map[string]string, namespaceKnown bool, ignoreNamespaceSelectors bool, ignoreObjectSelectors bool) bool {
 	if binding == nil || obj == nil {
 		return false
@@ -227,7 +227,7 @@ func detectScope(obj map[string]interface{}) admissionregistrationv1.ScopeType {
 	return admissionregistrationv1.NamespacedScope
 }
 
-// MetadataString returns a metadata string field from the object if present.
+// MetadataString returns the named metadata string field.
 func MetadataString(obj map[string]interface{}, key string) string {
 	metaFields, ok := obj["metadata"].(map[string]interface{})
 	if !ok {

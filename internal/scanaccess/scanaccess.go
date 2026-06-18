@@ -17,12 +17,10 @@ import (
 	"github.com/kolteq/kubeapt/pkg/types"
 )
 
-// Token is a phantom credential. Holding a Token means the caller imported
-// internal/scanaccess, which Go forbids for code outside the kubeapt module.
-// The zero value is the only value; there are no fields to populate.
+// Token is a phantom credential gating internal-only access.
 type Token struct{}
 
-// Parsed is the sealed, typed view of one policy in a bundle.
+// Parsed is the sealed typed view of one policy.
 type Parsed struct {
 	VAP      *admissionregistrationv1.ValidatingAdmissionPolicy
 	Bindings []*admissionregistrationv1.ValidatingAdmissionPolicyBinding

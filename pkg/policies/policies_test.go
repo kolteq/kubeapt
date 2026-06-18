@@ -558,6 +558,94 @@ func TestPolicyResources_Func(t *testing.T) {
 	}
 }
 
+func vapWithRule(groups, versions, resources []string) *admissionregistrationv1.ValidatingAdmissionPolicy {
+	return &admissionregistrationv1.ValidatingAdmissionPolicy{
+		Spec: admissionregistrationv1.ValidatingAdmissionPolicySpec{
+			MatchConstraints: &admissionregistrationv1.MatchResources{
+				ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{
+					{RuleWithOperations: admissionregistrationv1.RuleWithOperations{Rule: admissionregistrationv1.Rule{
+						APIGroups:   groups,
+						APIVersions: versions,
+						Resources:   resources,
+					}}},
+				},
+			},
+		},
+	}
+}
+
+func gvr(group, version, resource string) types.GVR {
+	return types.GVR{Group: group, Version: version, Resource: resource}
+}
+
+func TestPolicyTargetsGVRs_Func(t *testing.T) {
+	netpol := vapWithRule([]string{"networking.k8s.io"}, []string{"v1"}, []string{"networkpolicies"})
+	calico := vapWithRule([]string{"projectcalico.org"}, []string{"v3"}, []string{"networkpolicies"})
+	core := vapWithRule([]string{""}, []string{"v1"}, []string{"services"})
+	subres := vapWithRule([]string{""}, []string{"v1"}, []string{"pods/status"})
+	anyGroup := vapWithRule(nil, []string{"v1"}, []string{"networkpolicies"})
+	wildcard := vapWithRule([]string{"*"}, []string{"*"}, []string{"*"})
+
+	cases := []struct {
+		name string
+		vap  *admissionregistrationv1.ValidatingAdmissionPolicy
+		gvrs []types.GVR
+		want bool
+	}{
+		{"exact group+resource", netpol, []types.GVR{gvr("networking.k8s.io", "v1", "networkpolicies")}, true},
+		{"group distinguishes calico from k8s", netpol, []types.GVR{gvr("projectcalico.org", "v3", "networkpolicies")}, false},
+		{"calico matches its own group", calico, []types.GVR{gvr("projectcalico.org", "v3", "networkpolicies")}, true},
+		{"core group exact", core, []types.GVR{gvr("", "v1", "services")}, true},
+		{"core not matched by named-group request", core, []types.GVR{gvr("networking.k8s.io", "v1", "services")}, false},
+		{"resource mismatch", netpol, []types.GVR{gvr("networking.k8s.io", "v1", "services")}, false},
+		{"empty rule apiGroups matches any group", anyGroup, []types.GVR{gvr("networking.k8s.io", "v1", "networkpolicies")}, true},
+		{"subresource base matches", subres, []types.GVR{gvr("", "v1", "pods")}, true},
+		{"version ignored: empty request still matches", netpol, []types.GVR{gvr("networking.k8s.io", "", "networkpolicies")}, true},
+		{"version ignored: star request still matches", netpol, []types.GVR{gvr("networking.k8s.io", "*", "networkpolicies")}, true},
+		{"version ignored: concrete mismatch still matches", netpol, []types.GVR{gvr("networking.k8s.io", "v2", "networkpolicies")}, true},
+		{"request group star matches any", netpol, []types.GVR{gvr("*", "v1", "networkpolicies")}, true},
+		{"policy wildcard rule matches any gvr", wildcard, []types.GVR{gvr("anything.io", "v9", "widgets")}, true},
+		{"any of several", netpol, []types.GVR{gvr("", "v1", "services"), gvr("networking.k8s.io", "v1", "networkpolicies")}, true},
+		{"empty resource ignored", netpol, []types.GVR{gvr("networking.k8s.io", "v1", "")}, false},
+		{"empty gvrs", netpol, nil, false},
+		{"nil vap", nil, []types.GVR{gvr("", "v1", "services")}, false},
+		{"nil match constraints", &admissionregistrationv1.ValidatingAdmissionPolicy{}, []types.GVR{gvr("", "v1", "services")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policies.PolicyTargetsGVRs(tc.vap, tc.gvrs); got != tc.want {
+				t.Fatalf("PolicyTargetsGVRs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPolicy_TargetsGVR_Method(t *testing.T) {
+	// policyHighSeverityYAML targets core (apiGroups [""]) v1 pods.
+	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyHighSeverityYAML)}}, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, ok := bundle.Get("test-policy")
+	if !ok {
+		t.Fatal("test-policy missing")
+	}
+	if !p.TargetsGVR(types.GVR{Group: "", Version: "v1", Resource: "pods"}) {
+		t.Errorf("test-policy should target core/v1/pods")
+	}
+	if p.TargetsGVR(types.GVR{Group: "apps", Version: "v1", Resource: "deployments"}) {
+		t.Errorf("test-policy should not target apps/v1/deployments")
+	}
+	if p.TargetsGVR() {
+		t.Errorf("TargetsGVR() with no args must be false")
+	}
+
+	var nilPolicy *policies.Policy
+	if nilPolicy.TargetsGVR(types.GVR{Resource: "pods"}) {
+		t.Errorf("nil *Policy must not target anything")
+	}
+}
+
 func TestPolicyMethods_ResourcesAndTargets(t *testing.T) {
 	fsys := fstest.MapFS{
 		"all.yaml": {Data: []byte(policyHighSeverityYAML + "---\n" + deploymentPolicyYAML)},

@@ -185,9 +185,7 @@ func runBundleExport(cmd *cobra.Command, bundleName, version, output string) err
 	return nil
 }
 
-// verifyArchiveChecksum applies, in order: an explicit --checksum hex, then a
-// "<archive>.sha256" sidecar next to the file. If neither is available, the
-// import is refused — air-gap installs must be checksummed.
+// verifyArchiveChecksum checks the archive against explicit or sidecar checksum.
 func verifyArchiveChecksum(archivePath, explicit string) error {
 	actual, err := sha256File(archivePath)
 	if err != nil {
@@ -221,9 +219,7 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// readBundleManifestFromArchive streams the tarball and returns the parsed
-// bundle.json without unpacking other files. Used to derive the destination
-// directory before committing to an extraction location.
+// readBundleManifestFromArchive parses bundle.json from the tarball without unpacking.
 func readBundleManifestFromArchive(archivePath string) (bundleManifest, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
