@@ -15,6 +15,7 @@ import (
 	"github.com/kolteq/kubeapt/internal/scanaccess"
 	"github.com/kolteq/kubeapt/pkg/policies"
 	"github.com/kolteq/kubeapt/pkg/types"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
 
 const (
@@ -61,6 +62,24 @@ metadata:
   name: should-be-ignored
 data:
   key: value
+`
+
+	deploymentPolicyYAML = `apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: deploy-policy
+  annotations:
+    security.kubeapt.io/severity: low
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["deployments"]
+  validations:
+    - expression: "true"
+      message: "ok"
 `
 )
 
@@ -484,5 +503,144 @@ func TestBundleLabelsAndSources_DefensiveCopy(t *testing.T) {
 	}
 	if got := bundle.Sources()[0]; got != "s1" {
 		t.Errorf("Sources() mutation leaked back: got %q, want s1", got)
+	}
+}
+
+func vapTargeting(resources ...string) *admissionregistrationv1.ValidatingAdmissionPolicy {
+	return &admissionregistrationv1.ValidatingAdmissionPolicy{
+		Spec: admissionregistrationv1.ValidatingAdmissionPolicySpec{
+			MatchConstraints: &admissionregistrationv1.MatchResources{
+				ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{
+					{RuleWithOperations: admissionregistrationv1.RuleWithOperations{Rule: admissionregistrationv1.Rule{Resources: resources}}},
+				},
+			},
+		},
+	}
+}
+
+func TestPolicyTargetsResources_Func(t *testing.T) {
+	cases := []struct {
+		name      string
+		policy    *admissionregistrationv1.ValidatingAdmissionPolicy
+		resources []string
+		want      bool
+	}{
+		{"exact", vapTargeting("pods"), []string{"pods"}, true},
+		{"miss", vapTargeting("deployments"), []string{"pods"}, false},
+		{"base of subresource", vapTargeting("pods/status"), []string{"pods"}, true},
+		{"subresource request not covered by base", vapTargeting("pods"), []string{"pods/status"}, false},
+		{"wildcard", vapTargeting("*"), []string{"pods"}, true},
+		{"group wildcard", vapTargeting("*/*"), []string{"configmaps"}, true},
+		{"case insensitive", vapTargeting("Pods"), []string{"PODS"}, true},
+		{"any of several", vapTargeting("configmaps"), []string{"pods", "configmaps"}, true},
+		{"empty resources", vapTargeting("pods"), nil, false},
+		{"nil vap", nil, []string{"pods"}, false},
+		{"nil match constraints", &admissionregistrationv1.ValidatingAdmissionPolicy{}, []string{"pods"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policies.PolicyTargetsResources(tc.policy, tc.resources); got != tc.want {
+				t.Fatalf("PolicyTargetsResources() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPolicyResources_Func(t *testing.T) {
+	if got := strings.Join(policies.PolicyResources(vapTargeting("pods/status", "pods", "configmaps")), ","); got != "configmaps,pods" {
+		t.Fatalf("PolicyResources() = %q, want configmaps,pods", got)
+	}
+	if got := strings.Join(policies.PolicyResources(vapTargeting("*/*")), ","); got != "*" {
+		t.Fatalf("PolicyResources(wildcard) = %q, want *", got)
+	}
+	if got := policies.PolicyResources(nil); got != nil {
+		t.Fatalf("PolicyResources(nil) = %v, want nil", got)
+	}
+}
+
+func TestPolicyMethods_ResourcesAndTargets(t *testing.T) {
+	fsys := fstest.MapFS{
+		"all.yaml": {Data: []byte(policyHighSeverityYAML + "---\n" + deploymentPolicyYAML)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	pods, _ := bundle.Get("test-policy")
+	if pods == nil {
+		t.Fatal("test-policy missing")
+	}
+	if !pods.TargetsResources("pods") {
+		t.Errorf("test-policy should target pods")
+	}
+	if pods.TargetsResources("deployments") {
+		t.Errorf("test-policy should not target deployments")
+	}
+	if got := strings.Join(pods.Resources(), ","); got != "pods" {
+		t.Errorf("test-policy Resources() = %q, want pods", got)
+	}
+
+	// Nil-receiver and nil-VAP safety.
+	var nilPolicy *policies.Policy
+	if nilPolicy.TargetsResources("pods") {
+		t.Errorf("nil *Policy must not target anything")
+	}
+	if nilPolicy.Resources() != nil {
+		t.Errorf("nil *Policy Resources() must be nil")
+	}
+}
+
+func TestBundleFilterByResources(t *testing.T) {
+	fsys := fstest.MapFS{
+		"all.yaml":    {Data: []byte(policyHighSeverityYAML + "---\n" + bindingForTestPolicyYAML + "---\n" + deploymentPolicyYAML)},
+		"bundle.json": {Data: []byte(`{"name":"b","version":"1.0.0","sources":["s1"]}`)},
+	}
+	bundle, err := policies.Load(fsys, ".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if bundle.Len() != 2 {
+		t.Fatalf("precondition: Len = %d, want 2", bundle.Len())
+	}
+
+	filtered := bundle.FilterByResources("pods")
+	if filtered.Len() != 1 {
+		t.Fatalf("FilterByResources(pods) Len = %d, want 1", filtered.Len())
+	}
+	if _, ok := filtered.Get("test-policy"); !ok {
+		t.Errorf("expected test-policy retained")
+	}
+	if _, ok := filtered.Get("deploy-policy"); ok {
+		t.Errorf("expected deploy-policy filtered out")
+	}
+	// Bindings ride along with the kept policy.
+	kept, _ := filtered.Get("test-policy")
+	if !bytes.Contains(kept.BindingYAML, []byte("test-binding")) {
+		t.Errorf("kept policy lost its binding YAML")
+	}
+	// Bundle metadata is carried over.
+	if filtered.Name() != "b" || filtered.Version() != "1.0.0" {
+		t.Errorf("metadata not carried: name=%q version=%q", filtered.Name(), filtered.Version())
+	}
+	if got := strings.Join(filtered.Sources(), ","); got != "s1" {
+		t.Errorf("sources not carried: %q", got)
+	}
+	// The receiver is unchanged.
+	if bundle.Len() != 2 {
+		t.Errorf("FilterByResources mutated the receiver: Len = %d, want 2", bundle.Len())
+	}
+
+	// No resources -> structural copy with every policy.
+	if all := bundle.FilterByResources(); all.Len() != 2 {
+		t.Errorf("FilterByResources() Len = %d, want 2", all.Len())
+	}
+	// Multiple resources keep both.
+	if both := bundle.FilterByResources("pods", "deployments"); both.Len() != 2 {
+		t.Errorf("FilterByResources(pods,deployments) Len = %d, want 2", both.Len())
+	}
+	// Unmatched resource yields an empty bundle.
+	if none := bundle.FilterByResources("services"); none.Len() != 0 {
+		t.Errorf("FilterByResources(services) Len = %d, want 0", none.Len())
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/kolteq/kubeapt/internal/kubernetes"
 	"github.com/kolteq/kubeapt/internal/logging"
 	"github.com/kolteq/kubeapt/internal/worker"
+	policypkg "github.com/kolteq/kubeapt/pkg/policies"
 )
 
 var logLevelProvider func() string
@@ -93,6 +94,7 @@ func ValidateCmd(getLogLevel func() string) *cobra.Command {
 	cmd.Flags().String("bundle-version", "", "Bundle version to use with --bundle (defaults to latest)")
 	cmd.Flags().StringP("policies", "p", "", "Specify the file or folder to the ValidatingAdmissionPolicy YAML file")
 	cmd.Flags().StringP("policy-name", "P", "", "Policy name to use from downloaded policies")
+	cmd.Flags().String("policyresource", "", "Comma separated resource plurals (e.g. pods,deployments) to only evaluate policies whose matchConstraints target them")
 	cmd.Flags().StringP("bindings", "b", "", "Specify the file or folder to the ValidatingAdmissionPolicyBinding YAML file")
 	cmd.Flags().StringP("resource", "r", "", "Specify the file or folder to the resource YAML file to validate")
 	cmd.Flags().String("psa-level", "", "PSA level to evaluate when using the pod-security-admission bundle: baseline or restricted")
@@ -117,6 +119,10 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	policyName, err := flags.GetString("policy-name")
+	if err != nil {
+		return err
+	}
+	policyResourceInput, err := flags.GetString("policyresource")
 	if err != nil {
 		return err
 	}
@@ -417,6 +423,16 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	resourceFilter := parseResourceFilter(policyResourceInput)
+	if len(resourceFilter) > 0 {
+		originalCount := len(policies)
+		policies, bindings = filterPoliciesByResource(policies, bindings, resourceFilter)
+		if len(policies) == 0 {
+			return fmt.Errorf("no policies target resource %s", strings.Join(resourceFilter, ", "))
+		}
+		logging.Debugf("Filtered policies by resource %s: %d of %d retained", strings.Join(resourceFilter, ", "), len(policies), originalCount)
 	}
 
 	if ignoreBindings {
@@ -1143,6 +1159,61 @@ func parseNamespaces(arg string) []string {
 		}
 	}
 	return result
+}
+
+// parseResourceFilter splits a comma-separated --policyresource value into a
+// normalized, de-duplicated list of lowercase resource plurals. Empty entries
+// are dropped and an empty/whitespace argument yields nil.
+func parseResourceFilter(arg string) []string {
+	if strings.TrimSpace(arg) == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var result []string
+	for _, part := range strings.Split(arg, ",") {
+		trimmed := strings.ToLower(strings.TrimSpace(part))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+// filterPoliciesByResource narrows policies to those whose matchConstraints
+// target one of the requested resource plurals, and drops any binding that
+// references a policy that was filtered out (so binding evaluation never
+// references a missing policy). When resources is empty the inputs are
+// returned unchanged.
+func filterPoliciesByResource(policies []admissionregistrationv1.ValidatingAdmissionPolicy, bindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding, resources []string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, []admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+	if len(resources) == 0 {
+		return policies, bindings
+	}
+
+	keptPolicies := make([]admissionregistrationv1.ValidatingAdmissionPolicy, 0, len(policies))
+	keptNames := make(map[string]struct{}, len(policies))
+	for i := range policies {
+		if policypkg.PolicyTargetsResources(&policies[i], resources) {
+			keptPolicies = append(keptPolicies, policies[i])
+			keptNames[policies[i].Name] = struct{}{}
+		}
+	}
+
+	if len(bindings) == 0 {
+		return keptPolicies, bindings
+	}
+
+	keptBindings := make([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, 0, len(bindings))
+	for i := range bindings {
+		if _, ok := keptNames[bindings[i].Spec.PolicyName]; ok {
+			keptBindings = append(keptBindings, bindings[i])
+		}
+	}
+	return keptPolicies, keptBindings
 }
 
 func namespacesFromSelector(selector string) ([]string, error) {

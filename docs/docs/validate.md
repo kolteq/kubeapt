@@ -24,6 +24,27 @@ Namespace filtering:
 - `--namespaces` accepts a comma-separated list.
 - `--namespace-selector` selects namespaces by label.
 
+## Filtering policies by resource
+
+`--policyresource` (alias `--pr`, shorthand `-R`) narrows the policy set to only the policies whose `matchConstraints` target the named resource. Values are the **plural** resource names — the same form used in a policy's `spec.matchConstraints.resourceRules.resources` (for example `pods` or `deployments`), not the Kind:
+
+```bash
+# Only evaluate policies that target Pods
+kubeapt validate --bundle my-bundle --pr pods
+
+# Multiple resources, comma-separated
+kubeapt validate --bundle my-bundle --policyresource pods,deployments
+```
+
+This works with any policy source (`--bundle`, `--policies`, `--policy-name`, or the live cluster). Behavior:
+
+- Matching is case-insensitive and compares on the base resource, so a policy that targets `pods/status` is kept by `--pr pods`.
+- A policy whose rule uses the `*` (or `*/*`) wildcard targets every resource and is always kept.
+- Any binding that references a filtered-out policy is dropped, and when validating cluster resources only the retained resource kinds are fetched.
+- If no policy in the set targets the requested resource, the command exits with an error.
+
+> `-pr` (a single dash) is not a valid shorthand — flag shorthands are a single character, so `-pr` would be read as `-p r`. Use `-R`, or the `--pr` long alias.
+
 ## Views
 
 `--view` controls how results are grouped:
