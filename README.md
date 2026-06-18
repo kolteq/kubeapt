@@ -15,6 +15,16 @@ KubeAPT is a CLI for validating Kubernetes admission hardening. It evaluates Val
 
 Documentation lives at [https://kubeapt.io](https://kubeapt.io).
 
+## Installation
+
+Install the latest version of kubeapt using `go install`...
+
+```bash
+go install github.com/kolteq/kubeapt/cmd/kubeapt@latest
+```
+
+...or download a pre-built binary from the [releases page](https://github.com/kolteq/kubeapt/releases).
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kolteq/kubeapt&type=date&legend=top-left)](https://www.star-history.com/#kolteq/kubeapt&type=date&legend=top-left)
