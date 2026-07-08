@@ -24,8 +24,8 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	"github.com/cenroq/kubeapt/internal/scanaccess"
-	"github.com/cenroq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/v2/internal/scanaccess"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
 // ErrDuplicatePolicy reports two policies sharing a metadata.name.

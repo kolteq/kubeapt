@@ -29,13 +29,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"github.com/cenroq/kubeapt/internal/config"
-	"github.com/cenroq/kubeapt/internal/format"
-	"github.com/cenroq/kubeapt/internal/kubernetes"
-	"github.com/cenroq/kubeapt/internal/logging"
-	"github.com/cenroq/kubeapt/internal/worker"
-	policypkg "github.com/cenroq/kubeapt/pkg/policies"
-	"github.com/cenroq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/v2/internal/config"
+	"github.com/cenroq/kubeapt/v2/internal/format"
+	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
+	"github.com/cenroq/kubeapt/v2/internal/logging"
+	"github.com/cenroq/kubeapt/v2/internal/worker"
+	policypkg "github.com/cenroq/kubeapt/v2/pkg/policies"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
 var logLevelProvider func() string

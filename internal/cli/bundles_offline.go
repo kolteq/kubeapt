@@ -18,8 +18,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cenroq/kubeapt/internal/config"
-	"github.com/cenroq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/v2/internal/config"
+	"github.com/cenroq/kubeapt/v2/internal/logging"
 )
 
 func newBundleImportCmd() *cobra.Command {

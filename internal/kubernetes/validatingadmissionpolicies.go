@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"github.com/cenroq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/v2/internal/logging"
 )
 
 func LoadValidatingAdmissionPolicies(path string) ([]admissionregistrationv1.ValidatingAdmissionPolicy, error) {

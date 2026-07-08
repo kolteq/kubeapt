@@ -8,7 +8,7 @@ import (
     admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-    "github.com/cenroq/kubeapt/internal/config"
+    "github.com/cenroq/kubeapt/v2/internal/config"
 )
 
 func setHome(t *testing.T) {

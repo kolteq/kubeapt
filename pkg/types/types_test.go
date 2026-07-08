@@ -6,7 +6,7 @@ package types_test
 import (
 	"testing"
 
-	"github.com/cenroq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
 // TestManifestIsAlias asserts Manifest is a type alias for map.

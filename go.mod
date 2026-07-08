@@ -1,4 +1,4 @@
-module github.com/cenroq/kubeapt
+module github.com/cenroq/kubeapt/v2
 
 go 1.26.0
 

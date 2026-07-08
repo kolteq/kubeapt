@@ -9,11 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cenroq/kubeapt/internal/kubernetes"
-	"github.com/cenroq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
+	"github.com/cenroq/kubeapt/v2/internal/logging"
 )
 
-const appVersion = "2.0.0"
+const appVersion = "2.0.1"
 
 var (
 	rootCmd = &cobra.Command{

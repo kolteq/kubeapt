@@ -18,10 +18,10 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cenroq/kubeapt/internal/kubernetes"
-	"github.com/cenroq/kubeapt/internal/scanaccess"
-	"github.com/cenroq/kubeapt/pkg/policies"
-	"github.com/cenroq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
+	"github.com/cenroq/kubeapt/v2/internal/scanaccess"
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
 // Scanner evaluates a sealed policies.Bundle against caller-supplied manifests.

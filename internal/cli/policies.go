@@ -20,9 +20,9 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"sigs.k8s.io/yaml"
 
-	"github.com/cenroq/kubeapt/internal/config"
-	"github.com/cenroq/kubeapt/internal/kubernetes"
-	"github.com/cenroq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/v2/internal/config"
+	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
+	"github.com/cenroq/kubeapt/v2/internal/logging"
 )
 
 const (

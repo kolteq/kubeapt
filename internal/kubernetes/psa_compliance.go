@@ -10,7 +10,7 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
-	"github.com/cenroq/kubeapt/internal/worker"
+	"github.com/cenroq/kubeapt/v2/internal/worker"
 )
 
 type PSAViolation struct {

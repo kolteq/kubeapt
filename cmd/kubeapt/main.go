@@ -3,7 +3,7 @@
 
 package main
 
-import "github.com/cenroq/kubeapt/internal/cli"
+import "github.com/cenroq/kubeapt/v2/internal/cli"
 
 func main() {
 	cli.Execute()
