@@ -8,9 +8,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/cenroq/kubeapt/pkg/policies"
-	"github.com/cenroq/kubeapt/pkg/scanner"
-	"github.com/cenroq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
+	"github.com/cenroq/kubeapt/v2/pkg/scanner"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
 const policyForbidsNameYAML = `apiVersion: admissionregistration.k8s.io/v1

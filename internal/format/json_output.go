@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
 )
 
 type JSONEnvelope struct {

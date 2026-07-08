@@ -13,7 +13,7 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
-	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
 )
 
 const (

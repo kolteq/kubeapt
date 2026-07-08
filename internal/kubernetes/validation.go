@@ -8,7 +8,7 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
-	"github.com/cenroq/kubeapt/internal/cel"
+	"github.com/cenroq/kubeapt/v2/internal/cel"
 )
 
 type ValidationViolation struct {

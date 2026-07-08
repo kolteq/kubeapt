@@ -12,9 +12,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/cenroq/kubeapt/internal/scanaccess"
-	"github.com/cenroq/kubeapt/pkg/policies"
-	"github.com/cenroq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/v2/internal/scanaccess"
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
 

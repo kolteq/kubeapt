@@ -16,7 +16,7 @@ Documentation lives at [https://kubeapt.io](https://kubeapt.io).
 Install the latest version of kubeapt using `go install`...
 
 ```bash
-go install github.com/cenroq/kubeapt/cmd/kubeapt@latest
+go install github.com/cenroq/kubeapt/v2/cmd/kubeapt@latest
 ```
 
 ...or download a pre-built binary from the [releases page](https://github.com/cenroq/kubeapt/releases).
