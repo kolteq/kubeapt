@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package cli
 
@@ -19,9 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/version"
 	kubeclient "k8s.io/client-go/kubernetes"
 
-	"github.com/kolteq/kubeapt/internal/config"
-	"github.com/kolteq/kubeapt/internal/kubernetes"
-	"github.com/kolteq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/internal/config"
+	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/internal/logging"
 )
 
 const ()
@@ -196,8 +196,8 @@ func reportPSAAndPolicies(clientset *kubeclient.Clientset) error {
 		logging.Warnf("Policy bundle %s not found in %s. Run `kubeapt bundles download %s` to install.", bundleName, root, bundleName)
 	}
 
-	results, usesKolteqLabels := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
-	printPSATable(results, usesKolteqLabels, logging.Writer(), table.StyleRounded)
+	results, usesCenroqLabels := summarizePSALevels(pods, namespaceLabels, nil, true, compliance)
+	printPSATable(results, usesCenroqLabels, logging.Writer(), table.StyleRounded)
 	logging.Infof("For details run `kubeapt validate --bundle pod-security-admission --psa-level <baseline|restricted> --all-namespaces --report all`")
 	logging.Newline()
 

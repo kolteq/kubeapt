@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package cli
 
@@ -29,13 +29,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"github.com/kolteq/kubeapt/internal/config"
-	"github.com/kolteq/kubeapt/internal/format"
-	"github.com/kolteq/kubeapt/internal/kubernetes"
-	"github.com/kolteq/kubeapt/internal/logging"
-	"github.com/kolteq/kubeapt/internal/worker"
-	policypkg "github.com/kolteq/kubeapt/pkg/policies"
-	"github.com/kolteq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/internal/config"
+	"github.com/cenroq/kubeapt/internal/format"
+	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/internal/worker"
+	policypkg "github.com/cenroq/kubeapt/pkg/policies"
+	"github.com/cenroq/kubeapt/pkg/types"
 )
 
 var logLevelProvider func() string
@@ -1933,13 +1933,13 @@ type psaNamespaceResult struct {
 	Pods         int               `json:"podsChecked"`
 	Compliant    int               `json:"compliant"`
 	NonCompliant int               `json:"nonCompliant"`
-	Kolteq       map[string]bool   `json:"-"`
+	Cenroq       map[string]bool   `json:"-"`
 	Violations   []violationDetail `json:"violations,omitempty"`
 }
 
 func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string]string, namespaces []string, all bool, compliance map[string]kubernetes.PSAComplianceCounts) ([]psaNamespaceResult, bool) {
 	results := make(map[string]*psaNamespaceResult)
-	usesKolteqLabels := namespaceLabelsContainKolteq(namespaceLabels)
+	usesCenroqLabels := namespaceLabelsContainCenroq(namespaceLabels)
 	targetNamespaces := make(map[string]struct{})
 	for _, namespaceName := range namespaces {
 		if namespaceName != "" {
@@ -1959,18 +1959,18 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 			return res
 		}
 		labels = convertPSANamespaceLabels(labels)
-		kolteqModes := make(map[string]bool)
+		cenroqModes := make(map[string]bool)
 		for _, mode := range []string{"enforce", "audit", "warn"} {
-			if _, ok := labels["pss.security.kolteq.com/"+mode]; ok {
-				kolteqModes[mode] = true
-				usesKolteqLabels = true
+			if _, ok := labels[kubernetes.PSALabelPrefix+"/"+mode]; ok {
+				cenroqModes[mode] = true
+				usesCenroqLabels = true
 				continue
 			}
 		}
 		res := &psaNamespaceResult{
 			Namespace: namespaceName,
 			Modes:     convertPSALabels(labels),
-			Kolteq:    kolteqModes,
+			Cenroq:    cenroqModes,
 		}
 		results[namespaceName] = res
 		return res
@@ -2026,7 +2026,7 @@ func summarizePSALevels(pods []corev1.Pod, namespaceLabels map[string]map[string
 		return sorted[i].Namespace < sorted[j].Namespace
 	})
 
-	return sorted, usesKolteqLabels
+	return sorted, usesCenroqLabels
 }
 
 func convertPSAViolations(violations []kubernetes.PSAViolation) []violationDetail {
@@ -2047,7 +2047,7 @@ func convertPSAViolations(violations []kubernetes.PSAViolation) []violationDetai
 	return out
 }
 
-func printPSATable(results []psaNamespaceResult, useKolteqLabels bool, w io.Writer, style table.Style) {
+func printPSATable(results []psaNamespaceResult, useCenroqLabels bool, w io.Writer, style table.Style) {
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
@@ -2057,9 +2057,9 @@ func printPSATable(results []psaNamespaceResult, useKolteqLabels bool, w io.Writ
 	for _, res := range results {
 		t.AppendRow(table.Row{
 			res.Namespace,
-			formatPSAMode(res.Modes, res.Kolteq, "enforce", useKolteqLabels),
-			formatPSAMode(res.Modes, res.Kolteq, "audit", useKolteqLabels),
-			formatPSAMode(res.Modes, res.Kolteq, "warn", useKolteqLabels),
+			formatPSAMode(res.Modes, res.Cenroq, "enforce", useCenroqLabels),
+			formatPSAMode(res.Modes, res.Cenroq, "audit", useCenroqLabels),
+			formatPSAMode(res.Modes, res.Cenroq, "warn", useCenroqLabels),
 			res.Compliant,
 			res.NonCompliant,
 		})
@@ -2074,7 +2074,7 @@ func printPSATable(results []psaNamespaceResult, useKolteqLabels bool, w io.Writ
 	t.Render()
 }
 
-func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode string, useKolteqLabels bool) string {
+func formatPSAMode(modes map[string]string, cenroqModes map[string]bool, mode string, useCenroqLabels bool) string {
 	if modes == nil {
 		return "-"
 	}
@@ -2082,8 +2082,8 @@ func formatPSAMode(modes map[string]string, kolteqModes map[string]bool, mode st
 	if label == "" {
 		return "-"
 	}
-	if useKolteqLabels && kolteqModes != nil && kolteqModes[mode] {
-		return label + " (KolTEQ)"
+	if useCenroqLabels && cenroqModes != nil && cenroqModes[mode] {
+		return label + " (cenroq)"
 	}
 	return label
 }
@@ -2098,8 +2098,8 @@ func convertPSALabels(labels map[string]string) map[string]string {
 		switch {
 		case strings.HasPrefix(k, "pod-security.kubernetes.io/"):
 			canonical = strings.TrimPrefix(k, "pod-security.kubernetes.io/")
-		case strings.HasPrefix(k, "pss.security.kolteq.com/"):
-			canonical = strings.TrimPrefix(k, "pss.security.kolteq.com/")
+		case strings.HasPrefix(k, kubernetes.PSALabelPrefix+"/"):
+			canonical = strings.TrimPrefix(k, kubernetes.PSALabelPrefix+"/")
 		default:
 			continue
 		}
@@ -2114,10 +2114,10 @@ func convertPSALabels(labels map[string]string) map[string]string {
 	return result
 }
 
-func namespaceLabelsContainKolteq(labels map[string]map[string]string) bool {
+func namespaceLabelsContainCenroq(labels map[string]map[string]string) bool {
 	for _, nsLabels := range labels {
 		for k := range nsLabels {
-			if strings.Contains(k, "pss.security.kolteq.com/") {
+			if strings.Contains(k, kubernetes.PSALabelPrefix+"/") {
 				return true
 			}
 		}

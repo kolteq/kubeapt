@@ -13,7 +13,7 @@ import (
     admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-    "github.com/kolteq/kubeapt/pkg/types"
+    "github.com/cenroq/kubeapt/pkg/types"
 )
 
 func TestParseNamespaces(t *testing.T) {
@@ -108,7 +108,7 @@ func TestUniqueViolationFields(t *testing.T) {
 func TestPSALabelHelpers(t *testing.T) {
     labels := map[string]string{
         "pod-security.kubernetes.io/enforce": "baseline",
-        "pss.security.kolteq.com/warn":       "restricted",
+        "pss.security.cenroq.io/warn":       "restricted",
         "other":                              "ignore",
     }
     converted := convertPSALabels(labels)
@@ -117,7 +117,7 @@ func TestPSALabelHelpers(t *testing.T) {
     }
 
     modes := map[string]string{"enforce": "baseline"}
-    if got := formatPSAMode(modes, map[string]bool{"enforce": true}, "enforce", true); got != "baseline (KolTEQ)" {
+    if got := formatPSAMode(modes, map[string]bool{"enforce": true}, "enforce", true); got != "baseline (cenroq)" {
         t.Fatalf("unexpected PSA mode format: %s", got)
     }
 }

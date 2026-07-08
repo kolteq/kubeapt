@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 // Package scanaccess is an internal contract between pkg/policies (loader) and
 // pkg/scanner (evaluator). It carries the typed VAP/binding/severity view that
@@ -14,7 +14,7 @@ package scanaccess
 import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
-	"github.com/kolteq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/pkg/types"
 )
 
 // Token is a phantom credential gating internal-only access.

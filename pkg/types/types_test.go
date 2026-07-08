@@ -1,12 +1,12 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package types_test
 
 import (
 	"testing"
 
-	"github.com/kolteq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/pkg/types"
 )
 
 // TestManifestIsAlias asserts Manifest is a type alias for map.

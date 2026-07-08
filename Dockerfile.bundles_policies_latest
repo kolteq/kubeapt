@@ -1,4 +1,4 @@
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26.4
 
 FROM golang:${GO_VERSION}-bookworm AS builder
 WORKDIR /src
@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kubeapt ./cmd/kubeapt/
 
-RUN /out/kubeapt bundles download kolteq-best-practices
+RUN /out/kubeapt bundles download cenroq-best-practices
 RUN /out/kubeapt bundles download pod-security-admission
 RUN /out/kubeapt policies download
 

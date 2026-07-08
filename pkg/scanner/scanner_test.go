@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package scanner_test
 
@@ -8,9 +8,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/kolteq/kubeapt/pkg/policies"
-	"github.com/kolteq/kubeapt/pkg/scanner"
-	"github.com/kolteq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/pkg/policies"
+	"github.com/cenroq/kubeapt/pkg/scanner"
+	"github.com/cenroq/kubeapt/pkg/types"
 )
 
 const policyForbidsNameYAML = `apiVersion: admissionregistration.k8s.io/v1

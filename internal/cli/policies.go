@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package cli
 
@@ -20,13 +20,13 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"sigs.k8s.io/yaml"
 
-	"github.com/kolteq/kubeapt/internal/config"
-	"github.com/kolteq/kubeapt/internal/kubernetes"
-	"github.com/kolteq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/internal/config"
+	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/internal/logging"
 )
 
 const (
-	policiesIndexURL            = "https://raw.githubusercontent.com/kolteq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
+	policiesIndexURL            = "https://raw.githubusercontent.com/cenroq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
 	policiesArchive             = "policies.tar.gz"
 	policyAnnotationDisplayName = "security.kubeapt.io/displayName"
 	policyAnnotationDescription = "security.kubeapt.io/description"
@@ -649,7 +649,7 @@ func policyVersionInIndex(index policiesIndex, version string) bool {
 }
 
 func policiesArchiveURL(version string) string {
-	return fmt.Sprintf("https://github.com/kolteq/kubernetes-security-policies/releases/download/vap_policies%%40%s/%s", version, policiesArchive)
+	return fmt.Sprintf("https://github.com/cenroq/kubernetes-security-policies/releases/download/vap_policies%%40%s/%s", version, policiesArchive)
 }
 
 func policyVersionExists(version string) (bool, error) {

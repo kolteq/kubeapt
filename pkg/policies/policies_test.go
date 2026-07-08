@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package policies_test
 
@@ -12,9 +12,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/kolteq/kubeapt/internal/scanaccess"
-	"github.com/kolteq/kubeapt/pkg/policies"
-	"github.com/kolteq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/internal/scanaccess"
+	"github.com/cenroq/kubeapt/pkg/policies"
+	"github.com/cenroq/kubeapt/pkg/types"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
 
@@ -446,12 +446,12 @@ func TestBundleLabelsAndSources_Populated(t *testing.T) {
   "name": "pod-security-admission",
   "version": "v1.36.0",
   "labels": {
-    "audit":   "pss.security.kolteq.com/audit",
-    "enforce": "pss.security.kolteq.com/enforce",
-    "warn":    "pss.security.kolteq.com/warn"
+    "audit":   "pss.security.cenroq.io/audit",
+    "enforce": "pss.security.cenroq.io/enforce",
+    "warn":    "pss.security.cenroq.io/warn"
   },
   "sources": [
-    "https://github.com/kolteq/kubernetes-security-policies/releases/download/vap_pod-security-admission@v1.36.0/pod-security-admission.tar.gz"
+    "https://github.com/cenroq/kubernetes-security-policies/releases/download/vap_pod-security-admission@v1.36.0/pod-security-admission.tar.gz"
   ]
 }`)},
 	}
@@ -460,7 +460,7 @@ func TestBundleLabelsAndSources_Populated(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	labels := bundle.Labels()
-	if labels["audit"] != "pss.security.kolteq.com/audit" || labels["enforce"] != "pss.security.kolteq.com/enforce" || labels["warn"] != "pss.security.kolteq.com/warn" {
+	if labels["audit"] != "pss.security.cenroq.io/audit" || labels["enforce"] != "pss.security.cenroq.io/enforce" || labels["warn"] != "pss.security.cenroq.io/warn" {
 		t.Errorf("Labels() = %v, want audit/enforce/warn keys", labels)
 	}
 	sources := bundle.Sources()

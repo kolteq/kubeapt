@@ -1,9 +1,9 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package main
 
-import "github.com/kolteq/kubeapt/internal/cli"
+import "github.com/cenroq/kubeapt/internal/cli"
 
 func main() {
 	cli.Execute()
