@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 // Package policies loads kubeapt policy bundles from an fs.FS or directory,
 // preserving each policy's raw YAML bytes for downstream "remediation as code"
@@ -24,8 +24,8 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	"github.com/kolteq/kubeapt/internal/scanaccess"
-	"github.com/kolteq/kubeapt/pkg/types"
+	"github.com/cenroq/kubeapt/internal/scanaccess"
+	"github.com/cenroq/kubeapt/pkg/types"
 )
 
 // ErrDuplicatePolicy reports two policies sharing a metadata.name.

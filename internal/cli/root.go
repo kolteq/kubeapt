@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package cli
 
@@ -9,11 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/kolteq/kubeapt/internal/kubernetes"
-	"github.com/kolteq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/internal/logging"
 )
 
-const appVersion = "1.3.0"
+const appVersion = "2.0.0"
 
 var (
 	rootCmd = &cobra.Command{

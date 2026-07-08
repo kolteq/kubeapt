@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package cli
 
@@ -38,19 +38,20 @@ import (
 	"k8s.io/client-go/restmapper"
 	"sigs.k8s.io/yaml"
 
-	"github.com/kolteq/kubeapt/internal/config"
-	"github.com/kolteq/kubeapt/internal/kubernetes"
-	"github.com/kolteq/kubeapt/internal/logging"
+	"github.com/cenroq/kubeapt/internal/config"
+	"github.com/cenroq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/internal/logging"
 )
 
 const (
-	bundleIndexURL = "https://raw.githubusercontent.com/kolteq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/bundles/bundles.json"
+	bundleIndexURL = "https://raw.githubusercontent.com/cenroq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/bundles/bundles.json"
 )
 
 type bundleIndexEntry struct {
 	Name          string   `json:"name"`
 	LatestVersion string   `json:"latest-version"`
 	Versions      []string `json:"versions"`
+	Deprecated    int64    `json:"deprecated,omitempty"`
 	LocalOnly     bool     `json:"-"`
 }
 
@@ -387,11 +388,10 @@ func runBundleDownload(cmd *cobra.Command, bundleName, version string) error {
 		return err
 	}
 	if version != "" {
-		entry, ok := findBundleIndexEntry(bundles, bundleName)
-		if !ok {
+		if _, ok := findBundleIndexEntry(bundles, bundleName); !ok {
 			return fmt.Errorf("bundle %s not found; run `kubeapt bundles list` to see available bundles", bundleName)
 		}
-		if !bundleVersionInIndex(entry, version) {
+		if !indexHasBundleVersion(bundles, bundleName, version) {
 			return fmt.Errorf("bundle %s version %s not found; run `kubeapt bundles list` to see available versions", bundleName, version)
 		}
 	}
@@ -484,9 +484,7 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		return nil
 	}
 
-	sort.Slice(bundles, func(i, j int) bool {
-		return bundles[i].Name < bundles[j].Name
-	})
+	sortBundleEntries(bundles)
 
 	installedIndex := map[string]map[string]struct{}{}
 	if !local {
@@ -505,7 +503,7 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 	t := table.NewWriter()
 	t.SetOutputMirror(logging.Writer())
 	t.SetStyle(table.StyleRounded)
-	t.AppendHeader(table.Row{"Bundle", "Origin", "Latest", "Versions", "Downloaded", "Installed"})
+	t.AppendHeader(table.Row{"Bundle", "Origin", "Latest", "Deprecated", "Versions", "Downloaded", "Installed"})
 	for _, bundle := range bundles {
 		origin := "remote"
 		if bundle.LocalOnly {
@@ -514,6 +512,10 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		latest := bundle.LatestVersion
 		if latest == "" {
 			latest = "-"
+		}
+		deprecated := "-"
+		if bundle.Deprecated != 0 {
+			deprecated = time.Unix(bundle.Deprecated, 0).UTC().Format("2006-01-02")
 		}
 		downloadedVersions, err := config.BundleVersions(bundle.Name)
 		if err != nil {
@@ -549,7 +551,7 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 			downloaded = strings.Join(downloadedLines, "\n")
 			installed = strings.Join(installedLines, "\n")
 		}
-		t.AppendRow(table.Row{bundle.Name, origin, latest, versions, downloaded, installed})
+		t.AppendRow(table.Row{bundle.Name, origin, latest, deprecated, versions, downloaded, installed})
 	}
 	t.Render()
 	logging.Newline()
@@ -866,22 +868,33 @@ func resolveBundleVersionFromIndex(bundles []bundleIndexEntry, bundleName, versi
 	if version != "" {
 		return version, nil
 	}
-	for _, bundle := range bundles {
-		if bundle.Name == bundleName {
-			if bundle.LatestVersion == "" {
-				return "", fmt.Errorf("latest version for bundle %s not found", bundleName)
-			}
-			return bundle.LatestVersion, nil
-		}
+	bundle, ok := findBundleIndexEntry(bundles, bundleName)
+	if !ok {
+		return "", fmt.Errorf("bundle %s not found in index", bundleName)
 	}
-	return "", fmt.Errorf("bundle %s not found in index", bundleName)
+	if bundle.LatestVersion == "" {
+		return "", fmt.Errorf("latest version for bundle %s not found", bundleName)
+	}
+	return bundle.LatestVersion, nil
 }
 
+// findBundleIndexEntry returns the entry for bundleName, preferring the current
+// (non-deprecated) entry when the index also lists a deprecated duplicate.
 func findBundleIndexEntry(bundles []bundleIndexEntry, bundleName string) (bundleIndexEntry, bool) {
-	for _, bundle := range bundles {
-		if bundle.Name == bundleName {
-			return bundle, true
+	var deprecated *bundleIndexEntry
+	for i := range bundles {
+		if bundles[i].Name != bundleName {
+			continue
 		}
+		if bundles[i].Deprecated == 0 {
+			return bundles[i], true
+		}
+		if deprecated == nil {
+			deprecated = &bundles[i]
+		}
+	}
+	if deprecated != nil {
+		return *deprecated, true
 	}
 	return bundleIndexEntry{}, false
 }
@@ -895,8 +908,20 @@ func bundleVersionInIndex(bundle bundleIndexEntry, version string) bool {
 	return false
 }
 
+// indexHasBundleVersion reports whether version is offered by ANY index entry for
+// bundleName — including deprecated duplicates, so still-published deprecated
+// versions remain downloadable.
+func indexHasBundleVersion(bundles []bundleIndexEntry, bundleName, version string) bool {
+	for _, bundle := range bundles {
+		if bundle.Name == bundleName && bundleVersionInIndex(bundle, version) {
+			return true
+		}
+	}
+	return false
+}
+
 func bundleJSONURL(bundleName, version string) string {
-	return fmt.Sprintf("https://github.com/kolteq/kubernetes-security-policies/releases/download/vap_%s%%40%s/bundle.json", bundleName, version)
+	return fmt.Sprintf("https://github.com/cenroq/kubernetes-security-policies/releases/download/vap_%s%%40%s/bundle.json", bundleName, version)
 }
 
 func syncBundleIndexCache(data []byte) error {
@@ -1035,7 +1060,7 @@ func ensureBundleVersionAvailable(cmd *cobra.Command, bundleName, version string
 		}
 		remoteIndex, errIndex := fetchBundleIndex(cmd.Context(), bundleIndexURL)
 		if errIndex == nil {
-			if entry, ok := findBundleIndexEntry(remoteIndex, bundleName); ok && bundleVersionInIndex(entry, version) {
+			if _, ok := findBundleIndexEntry(remoteIndex, bundleName); ok && indexHasBundleVersion(remoteIndex, bundleName, version) {
 				if err := runBundleDownload(cmd, bundleName, version); err != nil {
 					return "", err
 				}
@@ -1217,7 +1242,7 @@ func installedBundleVersionIndex(ctx context.Context) (map[string]map[string]str
 		if bundleName == "" {
 			continue
 		}
-		version := binding.Annotations["policy-bundle.kolteq.com/version"]
+		version := binding.Annotations["policy-bundle.cenroq.io/version"]
 		if version == "" {
 			continue
 		}
@@ -1269,39 +1294,51 @@ func localBundleIndex() ([]bundleIndexEntry, error) {
 }
 
 func mergeBundleIndexes(remote, local []bundleIndexEntry) []bundleIndexEntry {
-	merged := make(map[string]*bundleIndexEntry, len(remote)+len(local))
-	for _, b := range remote {
-		copy := b
-		copy.LocalOnly = false
-		merged[b.Name] = &copy
+	// Preserve every remote entry verbatim — a deprecated duplicate and its current
+	// counterpart for the same name are both authoritative rows.
+	merged := make([]*bundleIndexEntry, 0, len(remote)+len(local))
+	byName := make(map[string][]*bundleIndexEntry, len(remote))
+	for i := range remote {
+		cp := remote[i]
+		cp.Versions = append([]string(nil), remote[i].Versions...)
+		cp.LocalOnly = false
+		merged = append(merged, &cp)
+		byName[cp.Name] = append(byName[cp.Name], &cp)
 	}
-	for _, b := range local {
-		existing, ok := merged[b.Name]
-		if !ok {
-			copy := b
-			if copy.LatestVersion == "" {
-				copy.LatestVersion = latestVersion(copy.Versions)
+
+	for _, l := range local {
+		entries := byName[l.Name]
+		if len(entries) == 0 {
+			// A bundle that exists only locally becomes its own row.
+			cp := l
+			cp.Versions = append([]string(nil), l.Versions...)
+			cp.LocalOnly = true
+			if cp.LatestVersion == "" {
+				cp.LatestVersion = latestVersion(cp.Versions)
 			}
-			copy.LocalOnly = true
-			merged[b.Name] = &copy
+			merged = append(merged, &cp)
+			byName[cp.Name] = append(byName[cp.Name], &cp)
 			continue
 		}
-		versionSet := make(map[string]struct{}, len(existing.Versions)+len(b.Versions))
-		for _, v := range existing.Versions {
-			versionSet[v] = struct{}{}
+		// Attribute a downloaded version to the remote entry that offers it; only
+		// versions no remote row lists (orphans) are added, to the current entry.
+		target := entries[0]
+		for _, e := range entries {
+			if e.Deprecated == 0 {
+				target = e
+				break
+			}
 		}
-		for _, v := range b.Versions {
-			if _, ok := versionSet[v]; ok {
+		for _, v := range l.Versions {
+			if versionCoveredByAny(entries, v) {
 				continue
 			}
-			existing.Versions = append(existing.Versions, v)
-			versionSet[v] = struct{}{}
+			target.Versions = append(target.Versions, v)
 		}
-		sort.Strings(existing.Versions)
-		if existing.LatestVersion == "" {
-			existing.LatestVersion = latestVersion(existing.Versions)
+		sort.Strings(target.Versions)
+		if target.LatestVersion == "" {
+			target.LatestVersion = latestVersion(target.Versions)
 		}
-		existing.LocalOnly = false
 	}
 
 	out := make([]bundleIndexEntry, 0, len(merged))
@@ -1309,13 +1346,31 @@ func mergeBundleIndexes(remote, local []bundleIndexEntry) []bundleIndexEntry {
 		if entry.LatestVersion == "" {
 			entry.LatestVersion = latestVersion(entry.Versions)
 		}
-		// keep LocalOnly as set above
 		out = append(out, *entry)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Name < out[j].Name
-	})
+	sortBundleEntries(out)
 	return out
+}
+
+// versionCoveredByAny reports whether version is listed by any of the given entries.
+func versionCoveredByAny(entries []*bundleIndexEntry, version string) bool {
+	for _, e := range entries {
+		if bundleVersionInIndex(*e, version) {
+			return true
+		}
+	}
+	return false
+}
+
+// sortBundleEntries orders by name, then places the current entry before its
+// deprecated duplicate (Deprecated == 0 sorts first).
+func sortBundleEntries(entries []bundleIndexEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Name != entries[j].Name {
+			return entries[i].Name < entries[j].Name
+		}
+		return entries[i].Deprecated < entries[j].Deprecated
+	})
 }
 
 func markBundleOrigins(bundles, remote []bundleIndexEntry, remoteOK bool) []bundleIndexEntry {
@@ -1323,14 +1378,28 @@ func markBundleOrigins(bundles, remote []bundleIndexEntry, remoteOK bool) []bund
 		return bundles
 	}
 	remoteSet := make(map[string]struct{}, len(remote))
+	hasCurrent := make(map[string]bool)
+	deprecatedTS := make(map[string]int64)
 	for _, b := range remote {
 		remoteSet[b.Name] = struct{}{}
+		if b.Deprecated == 0 {
+			hasCurrent[b.Name] = true
+		} else {
+			deprecatedTS[b.Name] = b.Deprecated
+		}
 	}
 	for i := range bundles {
 		if _, ok := remoteSet[bundles[i].Name]; ok {
 			bundles[i].LocalOnly = false
 		} else {
 			bundles[i].LocalOnly = true
+		}
+		// Surface deprecation for local entries when the remote index lists this
+		// bundle only as deprecated (no current entry of the same name).
+		if bundles[i].Deprecated == 0 && !hasCurrent[bundles[i].Name] {
+			if ts, ok := deprecatedTS[bundles[i].Name]; ok {
+				bundles[i].Deprecated = ts
+			}
 		}
 	}
 	return bundles

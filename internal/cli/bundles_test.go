@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -210,5 +211,102 @@ func TestEnsureBundleVersionAvailablePrefersLocalWhenMissingInIndex(t *testing.T
 	}
 	if got != "v1.2.3" {
 		t.Fatalf("expected to pick local version v1.2.3, got %s", got)
+	}
+}
+
+func TestDeprecatedBundleIndex(t *testing.T) {
+	data := []byte(`[
+		{"name":"cenroq-best-practices","latest-version":"v0.1.1","versions":["v0.1.1"]},
+		{"name":"pod-security-admission","latest-version":"v1.36.0-cenroq","versions":["v1.36.0-cenroq"]},
+		{"name":"pod-security-admission","latest-version":"v1.36.0","deprecated":1782856800,"versions":["v1.36.0","v1.35.0"]}
+	]`)
+	var index []bundleIndexEntry
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatalf("unmarshal index: %v", err)
+	}
+
+	// The deprecated timestamp is parsed onto the entry.
+	var depTS int64
+	for _, b := range index {
+		if b.Name == "pod-security-admission" && b.Deprecated != 0 {
+			depTS = b.Deprecated
+		}
+	}
+	if depTS != 1782856800 {
+		t.Fatalf("expected deprecated timestamp to be parsed, got %d", depTS)
+	}
+
+	// Merge keeps the current + deprecated duplicates as two separate rows.
+	merged := mergeBundleIndexes(index, nil)
+	psaRows := 0
+	for _, b := range merged {
+		if b.Name == "pod-security-admission" {
+			psaRows++
+		}
+	}
+	if psaRows != 2 {
+		t.Fatalf("expected current + deprecated pod-security-admission rows, got %d", psaRows)
+	}
+
+	// Lookups prefer the current (non-deprecated) entry...
+	entry, ok := findBundleIndexEntry(index, "pod-security-admission")
+	if !ok || entry.Deprecated != 0 || entry.LatestVersion != "v1.36.0-cenroq" {
+		t.Fatalf("expected current entry preferred, got %+v (ok=%v)", entry, ok)
+	}
+	if v, err := resolveBundleVersionFromIndex(merged, "pod-security-admission", ""); err != nil || v != "v1.36.0-cenroq" {
+		t.Fatalf("expected latest to resolve to current v1.36.0-cenroq, got %v %v", v, err)
+	}
+
+	// ...but a still-published deprecated version stays discoverable for download.
+	if !indexHasBundleVersion(index, "pod-security-admission", "v1.35.0") {
+		t.Fatalf("expected deprecated version v1.35.0 to be downloadable")
+	}
+	if indexHasBundleVersion(index, "pod-security-admission", "v9.9.9") {
+		t.Fatalf("did not expect unknown version to be found")
+	}
+}
+
+func TestMergeBundleIndexesDeprecatedLocalDownloads(t *testing.T) {
+	const depTS = int64(1782856800)
+	remote := []bundleIndexEntry{
+		{Name: "cenroq-best-practices", LatestVersion: "v0.1.1", Versions: []string{"v0.1.1"}},
+		{Name: "pod-security-admission", LatestVersion: "v1.36.0-cenroq", Versions: []string{"v1.36.0-cenroq"}},
+		{Name: "legacy-best-practices", LatestVersion: "v0.1.1", Versions: []string{"v0.1.1", "v0.1.0"}, Deprecated: depTS},
+		{Name: "pod-security-admission", LatestVersion: "v1.36.0", Versions: []string{"v1.36.0", "v1.35.0", "v1.34.0"}, Deprecated: depTS},
+	}
+	// Everything downloaded locally belongs to the deprecated (legacy) lineage.
+	local := []bundleIndexEntry{
+		{Name: "legacy-best-practices", Versions: []string{"v0.1.0", "v0.1.1"}},
+		{Name: "pod-security-admission", Versions: []string{"v1.34.0", "v1.36.0"}},
+		{Name: "telekom", Versions: []string{"v5.0.0"}},
+	}
+
+	merged := mergeBundleIndexes(remote, local)
+
+	rows := map[string]int{}
+	for _, b := range merged {
+		rows[b.Name]++
+	}
+	// A deprecated-only bundle that is also downloaded locally must not duplicate.
+	if rows["legacy-best-practices"] != 1 {
+		t.Fatalf("expected legacy-best-practices to appear once, got %d", rows["legacy-best-practices"])
+	}
+	if rows["pod-security-admission"] != 2 {
+		t.Fatalf("expected pod-security-admission current + deprecated rows, got %d", rows["pod-security-admission"])
+	}
+	if rows["telekom"] != 1 {
+		t.Fatalf("expected telekom local-only row, got %d", rows["telekom"])
+	}
+
+	for _, b := range merged {
+		// The current entry must not be polluted with deprecated-lineage versions.
+		if b.Name == "pod-security-admission" && b.Deprecated == 0 {
+			if len(b.Versions) != 1 || b.Versions[0] != "v1.36.0-cenroq" {
+				t.Fatalf("current pod-security-admission should list only v1.36.0-cenroq, got %v", b.Versions)
+			}
+		}
+		if b.Name == "telekom" && !b.LocalOnly {
+			t.Fatalf("expected telekom to be marked local-only")
+		}
 	}
 }

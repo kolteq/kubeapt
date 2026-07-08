@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package kubernetes
 
@@ -10,7 +10,7 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
-	"github.com/kolteq/kubeapt/internal/worker"
+	"github.com/cenroq/kubeapt/internal/worker"
 )
 
 type PSAViolation struct {
@@ -197,6 +197,10 @@ func EvaluatePSACompliance(policies []admissionregistrationv1.ValidatingAdmissio
 	return results, nil
 }
 
+// PSALabelPrefix is kubeapt's branded Pod Security Admission label domain,
+// mirroring the pod-security-admission bundle's label keys.
+const PSALabelPrefix = "pss.security.cenroq.io"
+
 func ApplyPSALevelLabels(labels map[string]string, level string) map[string]string {
 	if level == "" {
 		return labels
@@ -206,7 +210,7 @@ func ApplyPSALevelLabels(labels map[string]string, level string) map[string]stri
 		out[k] = v
 	}
 	for _, mode := range []string{"warn", "audit", "enforce"} {
-		out["pss.security.kolteq.com/"+mode] = level
+		out[PSALabelPrefix+"/"+mode] = level
 		out["pod-security.kubernetes.io/"+mode] = level
 	}
 	return out
@@ -233,14 +237,14 @@ func expandPSANamespaceLabels(labels map[string]string) map[string]string {
 	}
 	for _, mode := range []string{"warn", "audit", "enforce"} {
 		nativeKey := "pod-security.kubernetes.io/" + mode
-		kolteqKey := "pss.security.kolteq.com/" + mode
+		cenroqKey := PSALabelPrefix + "/" + mode
 		nativeVal, nativeOK := labels[nativeKey]
-		kolteqVal, kolteqOK := labels[kolteqKey]
-		if nativeOK && !kolteqOK {
-			result[kolteqKey] = nativeVal
+		cenroqVal, cenroqOK := labels[cenroqKey]
+		if nativeOK && !cenroqOK {
+			result[cenroqKey] = nativeVal
 		}
-		if kolteqOK && !nativeOK {
-			result[nativeKey] = kolteqVal
+		if cenroqOK && !nativeOK {
+			result[nativeKey] = cenroqVal
 		}
 	}
 	return result

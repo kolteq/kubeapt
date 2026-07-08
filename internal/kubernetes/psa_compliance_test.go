@@ -16,8 +16,8 @@ func TestApplyPSALevelLabels(t *testing.T) {
     if out["pod-security.kubernetes.io/enforce"] != "baseline" {
         t.Fatalf("expected enforce label to be set")
     }
-    if out["pss.security.kolteq.com/warn"] != "baseline" {
-        t.Fatalf("expected kolteq warn label to be set")
+    if out["pss.security.cenroq.io/warn"] != "baseline" {
+        t.Fatalf("expected cenroq warn label to be set")
     }
 }
 
@@ -26,8 +26,8 @@ func TestExpandPSANamespaceLabels(t *testing.T) {
         "pod-security.kubernetes.io/enforce": "restricted",
     }
     expanded := expandPSANamespaceLabels(labels)
-    if expanded["pss.security.kolteq.com/enforce"] != "restricted" {
-        t.Fatalf("expected kolteq label to mirror native")
+    if expanded["pss.security.cenroq.io/enforce"] != "restricted" {
+        t.Fatalf("expected cenroq label to mirror native")
     }
 }
 

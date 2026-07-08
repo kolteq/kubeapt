@@ -1,5 +1,5 @@
-// Copyright by KolTEQ GmbH
-// Contact: benjamin@kolteq.com
+// Copyright by cenroq AG
+// Contact: info@cenroq.com
 
 package format
 
@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/kolteq/kubeapt/internal/kubernetes"
+	"github.com/cenroq/kubeapt/internal/kubernetes"
 )
 
 type JSONEnvelope struct {
