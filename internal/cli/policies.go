@@ -23,15 +23,18 @@ import (
 	"github.com/cenroq/kubeapt/v2/internal/config"
 	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
 	"github.com/cenroq/kubeapt/v2/internal/logging"
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
 )
 
 const (
-	policiesIndexURL            = "https://raw.githubusercontent.com/cenroq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
-	policiesArchive             = "policies.tar.gz"
-	policyAnnotationDisplayName = "security.kubeapt.io/displayName"
-	policyAnnotationDescription = "security.kubeapt.io/description"
+	policiesIndexURL = "https://raw.githubusercontent.com/cenroq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
+	policiesArchive  = "policies.tar.gz"
+
+	policyAnnotationDisplayName = policies.AnnotationDisplayName
+	policyAnnotationDescription = policies.AnnotationDescription
+	policyAnnotationSeverity    = policies.AnnotationSeverity
+
 	policyAnnotationResource    = "security.kubeapt.io/resource"
-	policyAnnotationSeverity    = "security.kubeapt.io/severity"
 	policyAnnotationRemediation = "security.kubeapt.io/remediation"
 	policyAnnotationProduct     = "security.kubeapt.io/product"
 )

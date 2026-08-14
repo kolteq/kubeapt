@@ -4,36 +4,24 @@
 package cli
 
 import (
-	"strings"
-
 	"github.com/fatih/color"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
+	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
 const (
-	severityCritical = "Critical"
-	severityHigh     = "High"
-	severityModerate = "Moderate"
-	severityLow      = "Low"
-	severityInfo     = "Info"
-	severityNotRated = "Not Rated"
+	severityCritical = string(types.SeverityCritical)
+	severityHigh     = string(types.SeverityHigh)
+	severityModerate = string(types.SeverityModerate)
+	severityLow      = string(types.SeverityLow)
+	severityInfo     = string(types.SeverityInfo)
+	severityNotRated = string(types.SeverityNotRated)
 )
 
 func normalizeSeverity(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "critical":
-		return severityCritical
-	case "high":
-		return severityHigh
-	case "moderate":
-		return severityModerate
-	case "low":
-		return severityLow
-	case "info":
-		return severityInfo
-	default:
-		return severityNotRated
-	}
+	return string(policies.NormalizeSeverity(raw))
 }
 
 func severityRank(s string) int {

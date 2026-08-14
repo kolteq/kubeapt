@@ -33,14 +33,19 @@ var ErrDuplicatePolicy = errors.New("policies: duplicate policy id")
 
 // Annotation keys read from a parsed policy's metadata.
 const (
-	policyAnnotationSeverity    = "security.kubeapt.io/severity"
-	policyAnnotationDisplayName = "security.kubeapt.io/displayName"
-	policyAnnotationDescription = "security.kubeapt.io/description"
-	policyAnnotationCategory    = "security.kubeapt.io/category"
+	AnnotationSeverity    = "security.kubeapt.io/severity"
+	AnnotationDisplayName = "security.kubeapt.io/displayName"
+	AnnotationDescription = "security.kubeapt.io/description"
+	AnnotationCategory    = "security.kubeapt.io/category"
+)
 
-	kyvernoAnnotationTitle       = "policies.kyverno.io/title"
-	kyvernoAnnotationDescription = "policies.kyverno.io/description"
-	kyvernoAnnotationCategory    = "policies.kyverno.io/category"
+// Kyverno annotation keys, read as fallbacks by the accessors below and written
+// alongside their security.kubeapt.io equivalents by policy conversion.
+const (
+	KyvernoAnnotationTitle       = "policies.kyverno.io/title"
+	KyvernoAnnotationDescription = "policies.kyverno.io/description"
+	KyvernoAnnotationCategory    = "policies.kyverno.io/category"
+	KyvernoAnnotationSeverity    = "policies.kyverno.io/severity"
 )
 
 // Policy is a sealed handle to one ValidatingAdmissionPolicy in a Bundle.
@@ -59,7 +64,7 @@ func (p *Policy) Parsed(_ scanaccess.Token) *scanaccess.Parsed {
 
 // Title returns the policy's display name, falling back to ID.
 func (p *Policy) Title() string {
-	if v := p.lookupAnnotation(policyAnnotationDisplayName, kyvernoAnnotationTitle); v != "" {
+	if v := p.lookupAnnotation(AnnotationDisplayName, KyvernoAnnotationTitle); v != "" {
 		return v
 	}
 	return p.ID
@@ -67,12 +72,12 @@ func (p *Policy) Title() string {
 
 // Description returns the policy's description, or "" if unset.
 func (p *Policy) Description() string {
-	return p.lookupAnnotation(policyAnnotationDescription, kyvernoAnnotationDescription)
+	return p.lookupAnnotation(AnnotationDescription, KyvernoAnnotationDescription)
 }
 
 // Category returns the policy's category, or "" if unset.
 func (p *Policy) Category() string {
-	return p.lookupAnnotation(policyAnnotationCategory, kyvernoAnnotationCategory)
+	return p.lookupAnnotation(AnnotationCategory, KyvernoAnnotationCategory)
 }
 
 // lookupAnnotation returns the first non-empty annotation value, or "".
@@ -80,9 +85,13 @@ func (p *Policy) lookupAnnotation(keys ...string) string {
 	if p == nil || p.parsed == nil || p.parsed.VAP == nil {
 		return ""
 	}
-	ann := p.parsed.VAP.Annotations
+	return LookupAnnotation(p.parsed.VAP.Annotations, keys...)
+}
+
+// LookupAnnotation returns the first non-empty, trimmed value among keys, or "".
+func LookupAnnotation(in map[string]string, keys ...string) string {
 	for _, k := range keys {
-		if v := strings.TrimSpace(ann[k]); v != "" {
+		if v := strings.TrimSpace(in[k]); v != "" {
 			return v
 		}
 	}
@@ -226,9 +235,9 @@ func Load(fsys fs.FS, root string) (*Bundle, error) {
 	sort.Strings(files)
 
 	type pendingPolicy struct {
-		id      string
-		yaml    []byte
-		vap     *admissionregistrationv1.ValidatingAdmissionPolicy
+		id   string
+		yaml []byte
+		vap  *admissionregistrationv1.ValidatingAdmissionPolicy
 	}
 	type pendingBinding struct {
 		yaml    []byte
@@ -437,8 +446,13 @@ func joinYAMLDocuments(docs [][]byte) []byte {
 
 // severityFromAnnotations normalizes the severity annotation to a Severity.
 func severityFromAnnotations(annotations map[string]string) types.Severity {
-	raw := strings.ToLower(strings.TrimSpace(annotations[policyAnnotationSeverity]))
-	switch raw {
+	return NormalizeSeverity(annotations[AnnotationSeverity])
+}
+
+// NormalizeSeverity maps a raw annotation value onto kubeapt's severity scale,
+// returning types.SeverityNotRated for anything unrecognized.
+func NormalizeSeverity(raw string) types.Severity {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "critical":
 		return types.SeverityCritical
 	case "high":
