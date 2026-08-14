@@ -53,6 +53,7 @@ func init() {
 	rootCmd.AddCommand(ScanCmd())
 	rootCmd.AddCommand(BundleCmd())
 	rootCmd.AddCommand(PoliciesCmd())
+	rootCmd.AddCommand(ConvertCmd())
 }
 
 func getLogLevel() string {

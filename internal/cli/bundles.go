@@ -1106,6 +1106,65 @@ func ensureBundleVersionAvailable(cmd *cobra.Command, bundleName, version string
 	return "", fmt.Errorf("bundle %s is not available; add it under %s or download it", bundleName, root)
 }
 
+// locateInstalledBundle resolves an installed bundle to its policies and
+// bindings paths. An empty bundleVersion selects the newest installed version.
+// Every failure explains which command would fix it.
+func locateInstalledBundle(bundleName, bundleVersion string) (policiesPath, bindingsPath string, err error) {
+	if err := validateBundleSegment("bundle name", bundleName); err != nil {
+		return "", "", err
+	}
+
+	version := strings.TrimSpace(bundleVersion)
+	if version != "" {
+		if err := validateBundleSegment("bundle version", version); err != nil {
+			return "", "", err
+		}
+	} else {
+		versions, err := config.BundleVersions(bundleName)
+		if err != nil {
+			return "", "", err
+		}
+		if len(versions) == 0 {
+			dir, err := config.BundleDir(bundleName)
+			if err != nil {
+				return "", "", err
+			}
+			return "", "", fmt.Errorf("bundle %s is not installed; place it under %s or run `kubeapt bundles import --from <archive>`", bundleName, dir)
+		}
+		version = versions[len(versions)-1]
+	}
+
+	ok, err := bundleVersionExists(bundleName, version)
+	if err != nil {
+		return "", "", err
+	}
+	if !ok {
+		dir, err := config.BundleDir(bundleName)
+		if err != nil {
+			return "", "", err
+		}
+		return "", "", fmt.Errorf("bundle %s version %s is not found in %s", bundleName, version, dir)
+	}
+
+	policiesPath, bindingsPath, ok, err = config.LocateBundleFiles(bundleName, version)
+	if err != nil {
+		return "", "", err
+	}
+	if !ok {
+		root, err := config.BundleVersionDir(bundleName, version)
+		if err != nil {
+			return "", "", err
+		}
+		downloadCmd := fmt.Sprintf("kubeapt bundles download %s --version %s", bundleName, version)
+		if bundleVersion == "" {
+			downloadCmd = fmt.Sprintf("kubeapt bundles download %s", bundleName)
+		}
+		return "", "", fmt.Errorf("policy bundle %s %s not found in %s. Run `%s` to install", bundleName, version, root, downloadCmd)
+	}
+
+	return policiesPath, bindingsPath, nil
+}
+
 func bundleVersionExists(bundleName, version string) (bool, error) {
 	path, err := config.BundleVersionDir(bundleName, version)
 	if err != nil {

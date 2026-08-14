@@ -177,7 +177,7 @@ func loadValidatingAdmissionPoliciesFromPath(path string, onFile func(string)) (
 	}
 
 	if info.IsDir() {
-		files, err := collectManifestFiles(path)
+		files, err := CollectManifestFiles(path)
 		if err != nil {
 			return nil, err
 		}
@@ -210,7 +210,7 @@ func loadValidatingAdmissionPolicyBindingsFromPath(path string, onFile func(stri
 	}
 
 	if info.IsDir() {
-		files, err := collectManifestFiles(path)
+		files, err := CollectManifestFiles(path)
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +236,9 @@ func loadValidatingAdmissionPolicyBindingsFromPath(path string, onFile func(stri
 	return loadValidatingAdmissionPolicyBindingsFromFile(path)
 }
 
-func collectManifestFiles(dir string) ([]string, error) {
+// CollectManifestFiles returns the .yaml, .yml, and .json files directly inside
+// dir. It does not recurse.
+func CollectManifestFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -262,7 +264,7 @@ func CountManifestFiles(path string) (int, error) {
 		return 0, err
 	}
 	if info.IsDir() {
-		files, err := collectManifestFiles(path)
+		files, err := CollectManifestFiles(path)
 		if err != nil {
 			return 0, err
 		}
